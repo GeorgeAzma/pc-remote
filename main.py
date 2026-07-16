@@ -39,6 +39,26 @@ from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+# Hide the console window for child processes (so PowerShell doesn't flash).
+CREATE_NO_WINDOW = 0x08000000
+_SUBPROC_KWARGS = {"creationflags": CREATE_NO_WINDOW}
+
+# --- System master volume via winmm (WAVE_MAPPER maps to the default device) ---
+_WAVE_MAPPER = 0xFFFFFFFF  # -1: route to the system's preferred playback device
+
+
+def _set_master_volume(level: int):
+    v = int(max(0, min(100, level)) / 100 * 0xFFFF)
+    vol = v | (v << 16)  # same level on left/right channels
+    ctypes.windll.winmm.waveOutSetVolume(_WAVE_MAPPER, vol)
+
+
+def _get_master_volume() -> int:
+    out = ctypes.c_ulong()
+    ctypes.windll.winmm.waveOutGetVolume(_WAVE_MAPPER, ctypes.byref(out))
+    return int(round((out.value & 0xFFFF) / 0xFFFF * 100))
+
+
 START_TIME = time.time()
 
 HOST = os.environ.get("PC_API_HOST", "0.0.0.0")
@@ -47,14 +67,33 @@ TOKEN = os.environ.get("PC_API_TOKEN", "")
 
 commands: dict[str, dict] = {}
 
+# Resolve the PowerShell executable once (so subprocess works even when the
+# server's PATH is minimal, e.g. launched at Windows startup).
+def _find_powershell() -> str:
+    import shutil
+    found = shutil.which("powershell") or shutil.which("pwsh")
+    if found:
+        return found
+    for cand in (r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                 r"C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"):
+        if os.path.exists(cand):
+            return cand
+    return "powershell"
+
+POWERSHELL = _find_powershell()
+
 
 def command(name: str | None = None, description: str = "", confirm: bool = False,
              primary: bool = False, undo: bool = False, hide: bool = False,
-             ping: bool = False) -> callable:
+             ping: bool = False, range: list[str] | None = None,
+             tab: str = "") -> callable:
     """Register a function as a command/endpoint. confirm=True asks for a
-    tap-to-confirm; primary=False hides it under "Other"; undo=True shows a
-    Cancel button in its result; hide=True keeps it callable but off the UI;
-    ping=True measures real client<->server latency in the UI."""
+    tap-to-confirm; primary=True pins the card to the top of the UI;
+    undo=True shows a Cancel button in its result; hide=True keeps it callable
+    but off the UI; ping=True measures real client<->server latency in the UI;
+    range=["param"] renders that int param as a 0-100 slider in the UI;
+    tab="media"|"tools"|"power" groups non-primary commands under a
+    collapsible section of that name."""
     def decorator(func):
         cmd_name = (name or func.__name__).lower()
         params = []
@@ -74,6 +113,8 @@ def command(name: str | None = None, description: str = "", confirm: bool = Fals
             "undo": undo,
             "hide": hide,
             "ping": ping,
+            "range": set(range or []),
+            "tab": tab,
         }
         return func
     return decorator
@@ -130,6 +171,24 @@ def cancel_pending(cmd_name: str | None = None) -> bool:
         return True
 
 
+# Stats: count incoming requests and remember the last command run.
+REQUEST_COUNT = 0
+LAST_COMMAND = None
+_stats_lock = threading.Lock()
+
+
+def _record_request():
+    global REQUEST_COUNT
+    with _stats_lock:
+        REQUEST_COUNT += 1
+
+
+def _set_last(cmd: str):
+    global LAST_COMMAND
+    with _stats_lock:
+        LAST_COMMAND = cmd
+
+
 @command("sleep", "Put the computer to sleep (optionally after N seconds).", confirm=True, primary=True, undo=True)
 def sleep(seconds: int = 0):
     if seconds:
@@ -149,7 +208,7 @@ def _do_sleep():
     ctypes.windll.powrprof.SetSuspendState(0, 0, 0)
 
 
-@command("hibernate", "Hibernate the computer.", confirm=True)
+@command("hibernate", "Hibernate the computer.", confirm=True, tab="power")
 def hibernate():
     ctypes.windll.powrprof.SetSuspendState(1, 0, 0)
     return {"status": "hibernating"}
@@ -172,7 +231,7 @@ def shutdown(force: bool = False, seconds: int = 0):
     return {"status": "shutting_down", "seconds": 0}
 
 
-@command("restart", "Restart the computer.", confirm=True, undo=True)
+@command("restart", "Restart the computer.", confirm=True, undo=True, tab="power")
 def restart(force: bool = False, seconds: int = 0):
     flags = "/r" + (" /f" if force else "")
     subprocess.run(f"shutdown {flags} /t {seconds}", shell=True, check=True)
@@ -189,6 +248,144 @@ def cancel(cmd: str | None = None):
     return {"status": "cancelled" if cancelled else "nothing_pending"}
 
 
+# --- Display / media / clipboard commands ---
+
+@command("monitor", "Turn the monitor on or off.", primary=True)
+def monitor(on: bool = False):
+    HWND_BROADCAST = 0xFFFF
+    WM_SYSCOMMAND = 0x0112
+    SC_MONITORPOWER = 0xF170
+    ctypes.windll.user32.SendMessageW(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER,
+                                      -1 if on else 2)
+    return {"status": "monitor_on" if on else "monitor_off"}
+
+
+def _capture_screen_b64() -> str:
+    ps = (
+        "Add-Type -AssemblyName System.Windows.Forms;"
+        "Add-Type -AssemblyName System.Drawing;"
+        "$b = New-Object System.Drawing.Bitmap("
+        "[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width, "
+        "[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height);"
+        "$g = [System.Drawing.Graphics]::FromImage($b);"
+        "$g.CopyFromScreen(0,0,0,0,$b.Size);"
+        "$ms = New-Object System.IO.MemoryStream;"
+        "$b.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png);"
+        "[Convert]::ToBase64String($ms.ToArray())"
+    )
+    out = subprocess.run([POWERSHELL, "-NoProfile", "-Command", ps],
+                         capture_output=True, text=True, check=True,
+                         **_SUBPROC_KWARGS)
+    return out.stdout.strip()
+
+
+@command("screenshot", "Capture the screen and return the image.", primary=True)
+def screenshot():
+    return {"image": _capture_screen_b64()}
+
+
+@command("copy", "Read the PC clipboard and return its text.", tab="tools")
+def copy():
+    out = subprocess.run([POWERSHELL, "-NoProfile", "-Command", "Get-Clipboard"],
+                         capture_output=True, text=True, check=True,
+                         **_SUBPROC_KWARGS)
+    return {"text": out.stdout.rstrip("\n")}
+
+
+@command("paste", "Write text to the PC clipboard.", tab="tools")
+def paste(text: str = ""):
+    import tempfile
+    path = tempfile.mktemp(suffix=".txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    try:
+        subprocess.run([POWERSHELL, "-NoProfile", "-Command",
+                        f"Get-Content -Raw -Path '{path}' | Set-Clipboard"], check=True,
+                        **_SUBPROC_KWARGS)
+    finally:
+        os.remove(path)
+    return {"status": "copied", "length": len(text)}
+
+
+@command("brightness", "Set monitor brightness (0-100).", range=["level"], tab="media")
+def brightness(level: int = 50):
+    level = max(0, min(100, int(level)))
+    # Snap to a level the monitor actually supports (if discoverable).
+    ps = (
+        "$near = {level}; "
+        "try { "
+        "$b = Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightness "
+        "-ErrorAction Stop | Select-Object -First 1; "
+        "if ($b -and $b.Level) { "
+        "$near = ($b.Level | Sort-Object {[math]::Abs($_ - {level})} | "
+        "Select-Object -First 1) "
+        "} "
+        "} catch { } "
+        "Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightnessMethods "
+        "-ErrorAction Stop | ForEach-Object { $_.WmiSetBrightness(1, $near) }"
+    )
+    try:
+        subprocess.run([POWERSHELL, "-NoProfile", "-Command", ps], check=True,
+                       capture_output=True, text=True, **_SUBPROC_KWARGS)
+    except subprocess.CalledProcessError as exc:
+        msg = (exc.stderr or exc.stdout or str(exc)).strip().splitlines()
+        msg = msg[-1] if msg else "failed"
+        return {"status": "error", "detail": msg,
+                "hint": "monitor brightness may not be supported on this display"}
+    return {"status": "set", "level": level}
+
+
+@command("volume", "Set system volume (0-100).", range=["level"], tab="media")
+def volume(level: int = 50):
+    level = max(0, min(100, int(level)))
+    _set_master_volume(level)
+    return {"status": "set", "volume": level}
+
+
+@command("play", "Toggle media play/pause.", tab="media")
+def play():
+    VK_MEDIA_PLAY_PAUSE = 0xB3
+    ctypes.windll.user32.keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 0, 0)
+    ctypes.windll.user32.keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 2, 0)
+    return {"status": "toggled"}
+
+
+@command("bluetooth", "Enable or disable the Bluetooth radio (needs admin).", tab="tools")
+def bluetooth(on: bool = True):
+    verb = "Enable" if on else "Disable"
+    ps = (f"$e = Get-PnpDevice -Class Bluetooth -ErrorAction Stop | "
+          f"{verb}-PnpDevice -Confirm:$false -ErrorAction Stop; "
+          f"Write-Output 'ok'")
+    try:
+        out = subprocess.run([POWERSHELL, "-NoProfile", "-Command", ps],
+                             capture_output=True, text=True, check=True,
+                             **_SUBPROC_KWARGS)
+    except subprocess.CalledProcessError as exc:
+        msg = (exc.stderr or exc.stdout or str(exc)).strip().splitlines()
+        msg = msg[-1] if msg else "failed"
+        return {"status": "error", "detail": msg,
+                "hint": "run the server as Administrator"}
+    return {"status": "bluetooth_" + ("on" if on else "off")}
+
+
+@command("wifi", "Enable or disable the Wi-Fi interface (needs admin).", tab="tools")
+def wifi(on: bool = True):
+    state = "enable" if on else "disable"
+    ps = (f"netsh interface set interface name='Wi-Fi' admin={state}; "
+          f"if ($LASTEXITCODE -eq 0) {{ Write-Output 'ok' }} "
+          f"else {{ Write-Error 'netsh failed (admin required?)' }}")
+    try:
+        subprocess.run([POWERSHELL, "-NoProfile", "-Command", ps],
+                       capture_output=True, text=True, check=True,
+                       **_SUBPROC_KWARGS)
+    except subprocess.CalledProcessError as exc:
+        msg = (exc.stderr or exc.stdout or str(exc)).strip().splitlines()
+        msg = msg[-1] if msg else "failed"
+        return {"status": "error", "detail": msg,
+                "hint": "run the server as Administrator"}
+    return {"status": "wifi_" + ("on" if on else "off")}
+
+
 def _system_stats():
     stats = {}
     try:
@@ -199,24 +396,26 @@ def _system_stats():
     return stats
 
 
-@command("ping", "Measure round-trip latency to the server.", ping=True)
+@command("ping", "Measure round-trip latency to the server.", ping=True, tab="tools")
 def ping():
     return {"pong": True}
 
 
-@command("status", "Return basic server/PC status.")
+@command("status", "Return basic server/PC status.", tab="tools")
 def status():
     stats = _system_stats()
     return {
         "status": "ok",
         "uptime_s": int(time.time() - START_TIME),
+        "requests": REQUEST_COUNT,
+        "last_command": LAST_COMMAND,
         "pending": list(pending.keys()),
         "commands": list(commands.keys()),
         **stats,
     }
 
 
-@command("list", "List all available commands.")
+@command("list", "List all available commands.", tab="tools")
 def list_commands():
     return {
         name: {
@@ -270,12 +469,14 @@ class Handler(BaseHTTPRequestHandler):
                 kwargs[pname] = _coerce(str(body[pname]), p["type"])
         try:
             result = entry["func"](**kwargs)
+            _set_last(cmd_name)
         except Exception as exc:
             self._send(500, {"error": str(exc)})
             return
         self._send(200, {"command": cmd_name, "result": result})
 
     def do_GET(self):
+        _record_request()
         route, query = self._parse()
         if route == "/":
             return self._serve_index(query)
@@ -286,6 +487,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._run(route.lstrip("/"), query)
 
     def do_POST(self):
+        _record_request()
         route, query = self._parse()
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = json.loads(self.rfile.read(length) or b"{}") if length else {}
@@ -297,16 +499,22 @@ class Handler(BaseHTTPRequestHandler):
         token = query.get("token", [TOKEN])[0]
         visible = {n: m for n, m in commands.items() if not m.get("hide")}
         primary = [self._command_card(n, m) for n, m in visible.items() if m.get("primary")]
-        other = [self._command_card(n, m) for n, m in visible.items() if not m.get("primary")]
-        other_section = ""
-        if other:
-            other_section = (
-                '<div class="other-btn" onclick="this.nextElementSibling'
-                '.classList.toggle(\'open\'); this.querySelector(\'.chev\')'
-                '.classList.toggle(\'open\')">Other<span class="chev"></span></div>'
-                '<div class="other">' + "".join(other) + '</div>'
+        tabs: dict[str, list] = {}
+        for n, m in visible.items():
+            if m.get("primary"):
+                continue
+            tabs.setdefault(m.get("tab") or "tools", []).append(self._command_card(n, m))
+        tab_order = [t for t in ("media", "tools", "power") if t in tabs]
+        tab_sections = ""
+        for t in tab_order:
+            tab_sections += (
+                f'<div class="other-btn" onclick="this.nextElementSibling'
+                f'.classList.toggle(\'open\'); this.querySelector(\'chev\')'
+                f'.classList.toggle(\'open\')">{t.title()}'
+                f'<span class="chev"></span></div>'
+                f'<div class="other">' + "".join(tabs[t]) + '</div>'
             )
-        cards = "".join(primary) + other_section
+        cards = "".join(primary) + tab_sections
         html = f"""<!doctype html><html><head><meta name="viewport"
         content="width=device-width,initial-scale=1"><title>PC Remote</title>
         <meta name="color-scheme" content="dark"><style>
@@ -367,6 +575,17 @@ class Handler(BaseHTTPRequestHandler):
         padding:.4rem .8rem;border-radius:6px;font-weight:600;cursor:pointer;
         font-size:.85rem}}
         .undo button:hover{{background:#222732}}
+        .out img{{max-width:100%;border-radius:6px;display:block}}
+        .slider{{display:flex;align-items:center;gap:.7rem;margin:.15rem 0}}
+        .slider input[type=range]{{flex:1;width:100%;height:6px;-webkit-appearance:none;
+        appearance:none;background:#2a2f3a;border-radius:3px;outline:none;cursor:pointer}}
+        .slider input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;
+        appearance:none;width:18px;height:18px;border-radius:50%;
+        background:#4da3ff;cursor:pointer;border:2px solid #0f1115}}
+        .slider input[type=range]::-moz-range-thumb{{width:18px;height:18px;
+        border-radius:50%;background:#4da3ff;cursor:pointer;border:2px solid #0f1115}}
+        .slider .val{{min-width:2.5rem;text-align:right;color:#e6e6e6;font-size:.85rem;
+        font-variant-numeric:tabular-nums}}
         </style></head>
         <body><h1>PC Remote Control</h1>{cards}
         <script>
@@ -407,7 +626,16 @@ class Handler(BaseHTTPRequestHandler):
                  body: JSON.stringify(body)}});
               data = await res.json();
               ok = res.ok;
-              out.textContent = JSON.stringify(data, null, 2);
+              if (data.result && data.result.image) {{
+                out.textContent = '';
+                const img = document.createElement('img');
+                img.src = 'data:image/png;base64,' + data.result.image;
+                out.appendChild(img);
+              }} else if (data.result && 'text' in data.result) {{
+                out.textContent = data.result.text || '(empty clipboard)';
+              }} else {{
+                out.textContent = JSON.stringify(data, null, 2);
+              }}
             }}
           }} catch (e) {{
             ok = false;
@@ -474,11 +702,17 @@ class Handler(BaseHTTPRequestHandler):
     def _command_card(self, name: str, meta: dict) -> str:
         params = meta["params"]
         needs_confirm = meta.get("confirm", False)
+        rng = meta.get("range", set())
         fields = "".join(
-            f'<label>{p["name"]} ({p["type"]})'
-            f'<input name="{p["name"]}" type="'
-            f'{"number" if p["type"] in ("int","float") else "text"}"'
-            f' placeholder="{p["default"] if p["has_default"] else ""}"></label>'
+            (f'<div class="slider"><input name="{p["name"]}" type="range" '
+             f'min="0" max="100" value="{p["default"] if p["has_default"] else 50}" '
+             f'oninput="this.nextElementSibling.textContent=this.value">'
+             f'<span class="val">{p["default"] if p["has_default"] else 50}</span></div>'
+             if p["name"] in rng else
+             f'<label>{p["name"]} ({p["type"]})'
+             f'<input name="{p["name"]}" type="'
+             f'{"number" if p["type"] in ("int","float") else "text"}"'
+             f' placeholder="{p["default"] if p["has_default"] else ""}"></label>')
             for p in params
         )
         confirm_box = (f'<div class="confirm">Are you sure? '
