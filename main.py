@@ -358,8 +358,9 @@ class Handler(BaseHTTPRequestHandler):
         border-bottom:2px solid #9aa4b2;transform:rotate(-45deg);
         transition:transform .18s ease;margin-left:auto}}
         .other-btn .chev.open{{transform:rotate(45deg)}}
-        .other{{display:none;flex-direction:column;margin-top:.5rem}}
+        .other{{display:none;flex-direction:column;margin-top:.25rem}}
         .other.open{{display:flex}}
+        .other .card{{margin:.25rem 0}}
         .undo{{display:none;margin:.4rem .9rem .8rem}}
         .undo.show{{display:block}}
         .undo button{{background:#2a2f3a;color:#e6e6e6;border:1px solid #3a4150;
