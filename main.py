@@ -214,7 +214,7 @@ def hibernate():
     return {"status": "hibernating"}
 
 
-@command("lock", "Lock the workstation.", primary=True)
+@command("lock", "Lock the workstation.", tab="power")
 def lock():
     ctypes.windll.user32.LockWorkStation()
     return {"status": "locked"}
@@ -250,13 +250,23 @@ def cancel(cmd: str | None = None):
 
 # --- Display / media / clipboard commands ---
 
-@command("monitor", "Turn the monitor on or off.", primary=True)
+@command("monitor", "Turn the monitor on or off.", tab="power")
 def monitor(on: bool = False):
     HWND_BROADCAST = 0xFFFF
     WM_SYSCOMMAND = 0x0112
     SC_MONITORPOWER = 0xF170
-    ctypes.windll.user32.SendMessageW(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER,
-                                      -1 if on else 2)
+    if on:
+        # SC_MONITORPOWER(-1) alone is unreliable once the display is fully
+        # off; ES_DISPLAY_REQUIRED forces the display back on, and a tiny
+        # synthetic mouse move guarantees the wake is registered.
+        ctypes.windll.user32.SendMessageW(HWND_BROADCAST, WM_SYSCOMMAND,
+                                          SC_MONITORPOWER, -1)
+        ctypes.windll.kernel32.SetThreadExecutionState(0x00000002)  # ES_DISPLAY_REQUIRED
+        ctypes.windll.user32.mouse_event(0x0001, 0, 1, 0, 0)  # MOUSEEVENTF_MOVE
+        ctypes.windll.user32.mouse_event(0x0001, 0, 0, 0, 0)
+    else:
+        ctypes.windll.user32.SendMessageW(HWND_BROADCAST, WM_SYSCOMMAND,
+                                          SC_MONITORPOWER, 2)
     return {"status": "monitor_on" if on else "monitor_off"}
 
 
@@ -509,7 +519,7 @@ class Handler(BaseHTTPRequestHandler):
         for t in tab_order:
             tab_sections += (
                 f'<div class="other-btn" onclick="this.nextElementSibling'
-                f'.classList.toggle(\'open\'); this.querySelector(\'chev\')'
+                f'.classList.toggle(\'open\'); this.querySelector(\'.chev\')'
                 f'.classList.toggle(\'open\')">{t.title()}'
                 f'<span class="chev"></span></div>'
                 f'<div class="other">' + "".join(tabs[t]) + '</div>'
@@ -538,13 +548,14 @@ class Handler(BaseHTTPRequestHandler):
         border-bottom:2px solid #9aa4b2;transform:rotate(-45deg);
         transition:transform .18s ease}}
         .chev.open{{transform:rotate(45deg)}}
-        .details{{display:none;flex-direction:column;gap:.5rem;
+        .details{{display:none;flex-direction:row;flex-wrap:wrap;gap:.5rem .8rem;
         padding:0 .9rem .8rem}}
         .details.open{{display:flex}}
-        .details label{{display:flex;flex-direction:column;font-size:.8rem;
-        color:#9aa4b2;gap:.2rem}}
-        .details input{{background:#0f1115;border:1px solid #2a2f3a;color:#e6e6e6;
-        border-radius:6px;padding:.4rem .5rem;font-size:.9rem}}
+        .field{{display:inline-flex;align-items:center;gap:.4rem;font-size:.8rem;
+        color:#9aa4b2}}
+        .field input:not([type=checkbox]){{background:#0f1115;border:1px solid #2a2f3a;
+        color:#e6e6e6;border-radius:6px;padding:.35rem .5rem;font-size:.85rem;width:5.5rem}}
+        .bool-field{{gap:.5rem}}
         .out{{padding:.5rem .6rem;border-radius:6px;background:#0f1115;
         border:1px solid #2a2f3a;font-family:ui-monospace,monospace;
         font-size:.8rem;white-space:pre-wrap;display:none;color:#a7f3d0}}
@@ -586,6 +597,17 @@ class Handler(BaseHTTPRequestHandler):
         border-radius:50%;background:#4da3ff;cursor:pointer;border:2px solid #0f1115}}
         .slider .val{{min-width:2.5rem;text-align:right;color:#e6e6e6;font-size:.85rem;
         font-variant-numeric:tabular-nums}}
+        .bool-field{{display:flex;align-items:center;justify-content:space-between;
+        gap:.6rem;font-size:.85rem;color:#9aa4b2}}
+        .switch{{position:relative;display:inline-block;width:44px;height:24px;flex:none}}
+        .switch input{{opacity:0;width:0;height:0;margin:0}}
+        .switch .track{{position:absolute;cursor:pointer;inset:0;background:#2a2f3a;
+        border-radius:24px;transition:background .2s}}
+        .switch .track:before{{content:"";position:absolute;height:18px;width:18px;
+        left:3px;top:3px;background:#9aa4b2;border-radius:50%;
+        transition:transform .2s,background .2s}}
+        .switch input:checked + .track{{background:#4da3ff}}
+        .switch input:checked + .track:before{{transform:translateX(20px);background:#fff}}
         </style></head>
         <body><h1>PC Remote Control</h1>{cards}
         <script>
@@ -612,7 +634,10 @@ class Handler(BaseHTTPRequestHandler):
           const out = card.querySelector('.out');
           const inputs = card.querySelectorAll('.details input');
           const body = {{}};
-          inputs.forEach(i => {{ if (i.value !== '') body[i.name] = i.value; }});
+          inputs.forEach(i => {{
+            if (i.type === 'checkbox') {{ body[i.name] = i.checked; }}
+            else if (i.value !== '') {{ body[i.name] = i.value; }}
+          }});
           const isPing = card.querySelector('.ping-flag') !== null;
           let data = null;
           let ok = true;
@@ -703,18 +728,24 @@ class Handler(BaseHTTPRequestHandler):
         params = meta["params"]
         needs_confirm = meta.get("confirm", False)
         rng = meta.get("range", set())
-        fields = "".join(
-            (f'<div class="slider"><input name="{p["name"]}" type="range" '
-             f'min="0" max="100" value="{p["default"] if p["has_default"] else 50}" '
-             f'oninput="this.nextElementSibling.textContent=this.value">'
-             f'<span class="val">{p["default"] if p["has_default"] else 50}</span></div>'
-             if p["name"] in rng else
-             f'<label>{p["name"]} ({p["type"]})'
-             f'<input name="{p["name"]}" type="'
-             f'{"number" if p["type"] in ("int","float") else "text"}"'
-             f' placeholder="{p["default"] if p["has_default"] else ""}"></label>')
-            for p in params
-        )
+        def _field(p):
+            nm = p["name"]
+            if nm in rng:
+                val = p["default"] if p["has_default"] else 50
+                return (f'<div class="slider"><input name="{nm}" type="range" '
+                        f'min="0" max="100" value="{val}" '
+                        f'oninput="this.nextElementSibling.textContent=this.value">'
+                        f'<span class="val">{val}</span></div>')
+            if p["type"] == "bool":
+                checked = " checked" if (p["has_default"] and p["default"] is True) else ""
+                return (f'<label class="field bool-field">{nm}'
+                        f'<span class="switch"><input type="checkbox" name="{nm}"{checked}>'
+                        f'<span class="track"></span></span></label>')
+            itype = "number" if p["type"] in ("int", "float") else "text"
+            ph = p["default"] if p["has_default"] else ""
+            return (f'<label class="field">{nm}'
+                    f'<input name="{nm}" type="{itype}" placeholder="{ph}"></label>')
+        fields = "".join(_field(p) for p in params)
         confirm_box = (f'<div class="confirm">Are you sure? '
                        f'<button onclick="doConfirm(this.closest(\'.card\'), '
                        f'\'{name}\', true)">Yes</button>'
