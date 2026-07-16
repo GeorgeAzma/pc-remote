@@ -57,8 +57,12 @@ TOKEN = os.environ.get("PC_API_TOKEN", "")
 commands: dict[str, dict] = {}
 
 
-def command(name: str | None = None, description: str = ""):
-    """Register a function as a callable command/endpoint."""
+def command(name: str | None = None, description: str = "", confirm: bool = False):
+    """Register a function as a callable command/endpoint.
+
+    Set confirm=True for "scary" commands (sleep, shutdown, ...) so the UI
+    asks for a tap-to-confirm before executing.
+    """
     def decorator(func):
         cmd_name = (name or func.__name__).lower()
         params = []
@@ -73,6 +77,7 @@ def command(name: str | None = None, description: str = ""):
             "func": func,
             "description": description or (func.__doc__ or "").strip(),
             "params": params,
+            "confirm": confirm,
         }
         return func
     return decorator
@@ -112,7 +117,7 @@ def _coerce(value: str, annotation):
 # ---------------------------------------------------------------------------
 # commands
 # ---------------------------------------------------------------------------
-@command("sleep", "Put the computer to sleep (optionally after N seconds).")
+@command("sleep", "Put the computer to sleep (optionally after N seconds).", confirm=True)
 def sleep(seconds: int = 0):
     if seconds:
         time.sleep(seconds)
@@ -121,7 +126,7 @@ def sleep(seconds: int = 0):
     return {"status": "sleeping"}
 
 
-@command("hibernate", "Hibernate the computer.")
+@command("hibernate", "Hibernate the computer.", confirm=True)
 def hibernate():
     ctypes.windll.powrprof.SetSuspendState(1, 0, 0)
     return {"status": "hibernating"}
@@ -133,14 +138,14 @@ def lock():
     return {"status": "locked"}
 
 
-@command("shutdown", "Shut the computer down (use force=true if needed).")
+@command("shutdown", "Shut the computer down (use force=true if needed).", confirm=True)
 def shutdown(force: bool = False, seconds: int = 0):
     flags = "/s" + (" /f" if force else "")
     subprocess.run(f"shutdown {flags} /t {seconds}", shell=True, check=True)
     return {"status": "shutting_down", "seconds": seconds}
 
 
-@command("restart", "Restart the computer.")
+@command("restart", "Restart the computer.", confirm=True)
 def restart(force: bool = False, seconds: int = 0):
     flags = "/r" + (" /f" if force else "")
     subprocess.run(f"shutdown {flags} /t {seconds}", shell=True, check=True)
@@ -255,27 +260,44 @@ class Handler(BaseHTTPRequestHandler):
         cursor:pointer;user-select:none}}
         .row:hover{{background:#1d212b}}
         .name{{font-weight:600;color:#4da3ff;font-size:1.05rem;flex:1}}
-        .chev{{color:#9aa4b2;font-size:1.1rem;transition:transform .15s;
-        padding:0 .2rem}}
-        .chev.open{{transform:rotate(90deg)}}
-        .params{{padding:0 .9rem .8rem;display:none;flex-direction:column;gap:.5rem}}
-        .params.open{{display:flex}}
-        .params label{{display:flex;flex-direction:column;font-size:.8rem;
+        .chev-wrap{{display:flex;align-items:center;justify-content:center;
+        width:40px;height:40px;margin:-8px -8px -8px 0;border-radius:8px;
+        flex:none;cursor:pointer}}
+        .chev-wrap:hover{{background:#222732}}
+        .chev{{width:8px;height:8px;border-right:2px solid #9aa4b2;
+        border-bottom:2px solid #9aa4b2;transform:rotate(-45deg);
+        transition:transform .18s ease}}
+        .chev.open{{transform:rotate(45deg)}}
+        .details{{display:none;flex-direction:column;gap:.5rem;
+        padding:0 .9rem .8rem}}
+        .details.open{{display:flex}}
+        .details label{{display:flex;flex-direction:column;font-size:.8rem;
         color:#9aa4b2;gap:.2rem}}
-        .params input{{background:#0f1115;border:1px solid #2a2f3a;color:#e6e6e6;
+        .details input{{background:#0f1115;border:1px solid #2a2f3a;color:#e6e6e6;
         border-radius:6px;padding:.4rem .5rem;font-size:.9rem}}
-        .out{{margin:.2rem .9rem .8rem;padding:.5rem .6rem;border-radius:6px;
-        background:#0f1115;border:1px solid #2a2f3a;font-family:ui-monospace,
-        monospace;font-size:.8rem;white-space:pre-wrap;display:none;color:#a7f3d0}}
+        .out{{padding:.5rem .6rem;border-radius:6px;background:#0f1115;
+        border:1px solid #2a2f3a;font-family:ui-monospace,monospace;
+        font-size:.8rem;white-space:pre-wrap;display:none;color:#a7f3d0}}
         .out.err{{color:#fca5a5}}
         .out.show{{display:block}}
+        .confirm{{display:none;align-items:center;gap:.6rem;margin:.2rem .9rem .8rem;
+        padding:.5rem .7rem;border-radius:8px;background:#2a1414;
+        border:1px solid #5b2b2b;font-size:.85rem;color:#fca5a5}}
+        .confirm.show{{display:flex}}
+        .confirm button{{background:#dc2626;color:#fff;border:0;padding:.4rem .8rem;
+        border-radius:6px;font-weight:600;cursor:pointer}}
+        .confirm button.no{{background:#2a2f3a;color:#e6e6e6}}
         </style></head>
         <body><h1>PC Remote Control</h1>{cards}
         <script>
         const TOKEN = {json.dumps(token)};
+        function toggleDetails(card) {{
+          card.querySelector('.details').classList.toggle('open');
+          card.querySelector('.chev').classList.toggle('open');
+        }}
         async function run(card, cmd) {{
           const out = card.querySelector('.out');
-          const inputs = card.querySelectorAll('.params input');
+          const inputs = card.querySelectorAll('.details input');
           const body = {{}};
           inputs.forEach(i => {{ if (i.value !== '') body[i.name] = i.value; }});
           try {{
@@ -288,14 +310,22 @@ class Handler(BaseHTTPRequestHandler):
           }} catch (e) {{
             out.textContent = String(e); out.className = 'out show err';
           }}
+          card.querySelector('.details').classList.add('open');
+          card.querySelector('.chev').classList.add('open');
         }}
-        function onRow(card, cmd, hasParams, ev) {{
-          if (hasParams && ev.target.classList.contains('chev')) {{
-            card.querySelector('.params').classList.toggle('open');
-            card.querySelector('.chev').classList.toggle('open');
+        function onRow(card, cmd, needsConfirm, ev) {{
+          if (needsConfirm) {{
+            const box = card.querySelector('.confirm');
+            box.classList.add('show');
+            card.querySelector('.details').classList.add('open');
+            card.querySelector('.chev').classList.add('open');
             return;
           }}
           run(card, cmd);
+        }}
+        function doConfirm(card, cmd, yes) {{
+          card.querySelector('.confirm').classList.remove('show');
+          if (yes) run(card, cmd);
         }}
         </script></body></html>"""
         body = html.encode("utf-8")
@@ -307,26 +337,29 @@ class Handler(BaseHTTPRequestHandler):
 
     def _command_card(self, name: str, meta: dict, token: str) -> str:
         params = meta["params"]
-        has_params = bool(params)
-        if has_params:
-            fields = "".join(
-                f'<label>{p["name"]} ({p["type"]})'
-                f'<input name="{p["name"]}" type="'
-                f'{"number" if p["type"] in ("int","float") else "text"}"'
-                f' placeholder="{p["default"] if p["has_default"] else ""}"></label>'
-                for p in params
-            )
-            chev = '<span class="chev" title="parameters">&#9656;</span>'
-            params_box = f'<div class="params">{fields}</div>'
-        else:
-            chev = ""
-            params_box = ""
+        needs_confirm = meta.get("confirm", False)
+        fields = "".join(
+            f'<label>{p["name"]} ({p["type"]})'
+            f'<input name="{p["name"]}" type="'
+            f'{"number" if p["type"] in ("int","float") else "text"}"'
+            f' placeholder="{p["default"] if p["has_default"] else ""}"></label>'
+            for p in params
+        )
+        confirm_box = (f'<div class="confirm">Are you sure? '
+                       f'<button onclick="doConfirm(this.closest(\'.card\'), '
+                       f'\'{name}\', true)">Yes</button>'
+                       f'<button class="no" onclick="doConfirm(this.closest'
+                       f'(\'.card\'), \'{name}\', false)">No</button></div>'
+                       ) if needs_confirm else ""
+        chev = ('<span class="chev-wrap" onclick="event.stopPropagation();'
+                'toggleDetails(this.closest(\'.card\'))">'
+                '<span class="chev" title="details"></span></span>')
+        details = f'<div class="details">{fields}<div class="out"></div></div>'
         return (f'<div class="card"><div class="row" '
                 f'onclick="onRow(this.closest(\'.card\'), \'{name}\', '
-                f'{str(has_params).lower()}, event)">'
+                f'{str(needs_confirm).lower()}, event)">'
                 f'<span class="name">{name}</span>{chev}'
-                f'</div>{params_box}'
-                f'<div class="out"></div></div>')
+                f'</div>{details}{confirm_box}</div>')
 
     # quieter logs
     def log_message(self, *args):
