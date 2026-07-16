@@ -10,7 +10,7 @@ from your phone (or any device on the network). It is designed to be
 Quick start
 -----------
     # Run it (uses the venv interpreter, no console window)
-    #   .venv\Scripts\pythonw.exe main.py
+    #   .venv\\Scripts\\pythonw.exe main.py
 
     # From your phone, open:  http://<PC-IP>:8000/
     # Or hit an endpoint directly:  http://<PC-IP>:8000/sleep
@@ -30,8 +30,6 @@ Configuration (environment variables)
     PC_API_TOKEN  shared secret       (default empty = open)
 """
 
-from __future__ import annotations
-
 import ctypes
 import inspect
 import json
@@ -41,28 +39,16 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 HOST = os.environ.get("PC_API_HOST", "0.0.0.0")
 PORT = int(os.environ.get("PC_API_PORT", "1024"))
 TOKEN = os.environ.get("PC_API_TOKEN", "")
 
-# ---------------------------------------------------------------------------
-# Command registry
-# ---------------------------------------------------------------------------
-# Each command is a plain function. Its name (or the name you pass to the
-# decorator) becomes the URL path. Query-string / JSON parameters are matched
-# to the function's keyword arguments and coerced to the declared type.
 commands: dict[str, dict] = {}
 
 
 def command(name: str | None = None, description: str = "", confirm: bool = False):
-    """Register a function as a callable command/endpoint.
-
-    Set confirm=True for "scary" commands (sleep, shutdown, ...) so the UI
-    asks for a tap-to-confirm before executing.
-    """
+    """Register a function as a command/endpoint. confirm=True asks for a
+    tap-to-confirm in the UI before executing (for scary commands)."""
     def decorator(func):
         cmd_name = (name or func.__name__).lower()
         params = []
@@ -84,7 +70,6 @@ def command(name: str | None = None, description: str = "", confirm: bool = Fals
 
 
 def _type_name(annotation) -> str:
-    """Human/JS-friendly type name for a parameter annotation."""
     if annotation is bool:
         return "bool"
     if annotation is int:
@@ -94,34 +79,20 @@ def _type_name(annotation) -> str:
     return "str"
 
 
-def execute(cmd_name: str, params: dict | None = None):
-    """Run a registered command by name and return its result."""
-    params = params or {}
-    entry = commands.get(cmd_name.lower())
-    if not entry:
-        raise KeyError(f"Unknown command: {cmd_name}")
-    return entry["func"](**params)
-
-
-def _coerce(value: str, annotation):
-    """Best-effort conversion of a string param to the function's type."""
-    if annotation is bool:
+def _coerce(value: str, type_name: str):
+    if type_name == "bool":
         return str(value).lower() in ("1", "true", "yes", "on", "y")
-    if annotation is int:
+    if type_name == "int":
         return int(value)
-    if annotation is float:
+    if type_name == "float":
         return float(value)
     return value
 
 
-# ---------------------------------------------------------------------------
-# commands
-# ---------------------------------------------------------------------------
 @command("sleep", "Put the computer to sleep (optionally after N seconds).", confirm=True)
 def sleep(seconds: int = 0):
     if seconds:
         time.sleep(seconds)
-    # SetSuspendState(Hibernate=0, ForceCritical=0, DisableWakeEvent=0)
     ctypes.windll.powrprof.SetSuspendState(0, 0, 0)
     return {"status": "sleeping"}
 
@@ -208,22 +179,20 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": f"unknown command: {cmd_name}",
                              "available": list(commands.keys())})
             return
-        # build kwargs from query string or JSON body.
         kwargs: dict = {}
         for p in entry["params"]:
             pname = p["name"]
             if pname in query:
                 kwargs[pname] = _coerce(query[pname][0], p["type"])
             elif body and pname in body:
-                kwargs[pname] = body[pname]
+                kwargs[pname] = _coerce(str(body[pname]), p["type"])
         try:
             result = entry["func"](**kwargs)
-        except Exception as exc:  # surface errors to the caller
+        except Exception as exc:
             self._send(500, {"error": str(exc)})
             return
         self._send(200, {"command": cmd_name, "result": result})
 
-    # -- request handlers --------------------------------------------------
     def do_GET(self):
         route, query = self._parse()
         if route == "/":
@@ -244,7 +213,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized(query):
             return
         token = query.get("token", [TOKEN])[0]
-        cards = "".join(self._command_card(name, meta, token)
+        cards = "".join(self._command_card(name, meta)
                         for name, meta in commands.items())
         html = f"""<!doctype html><html><head><meta name="viewport"
         content="width=device-width,initial-scale=1"><title>PC Remote</title>
@@ -317,10 +286,7 @@ class Handler(BaseHTTPRequestHandler):
         }}
         function onRow(card, cmd, needsConfirm, ev) {{
           if (needsConfirm) {{
-            const box = card.querySelector('.confirm');
-            box.classList.add('show');
-            card.querySelector('.details').classList.add('open');
-            const ch = card.querySelector('.chev'); if (ch) ch.classList.add('open');
+            card.querySelector('.confirm').classList.add('show');
             return;
           }}
           run(card, cmd);
@@ -337,7 +303,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _command_card(self, name: str, meta: dict, token: str) -> str:
+    def _command_card(self, name: str, meta: dict) -> str:
         params = meta["params"]
         needs_confirm = meta.get("confirm", False)
         fields = "".join(
@@ -353,9 +319,6 @@ class Handler(BaseHTTPRequestHandler):
                        f'<button class="no" onclick="doConfirm(this.closest'
                        f'(\'.card\'), \'{name}\', false)">No</button></div>'
                        ) if needs_confirm else ""
-        # Render the arrow always. For commands with parameters it shows
-        # immediately (so params are expandable); for param-less commands it
-        # stays hidden until a result exists (no empty expandable panel).
         chev_cls = "chev-wrap show" if params else "chev-wrap"
         chev = (f'<span class="{chev_cls}" onclick="event.stopPropagation();'
                 'toggleDetails(this.closest(\'.card\'))">'
@@ -367,7 +330,6 @@ class Handler(BaseHTTPRequestHandler):
                 f'<span class="name">{name}</span>{chev}'
                 f'</div>{details}{confirm_box}</div>')
 
-    # quieter logs
     def log_message(self, *args):
         pass
 
