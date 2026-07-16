@@ -35,9 +35,12 @@ import inspect
 import json
 import os
 import subprocess
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
+
+START_TIME = time.time()
 
 HOST = os.environ.get("PC_API_HOST", "0.0.0.0")
 PORT = int(os.environ.get("PC_API_PORT", "1024"))
@@ -46,9 +49,11 @@ TOKEN = os.environ.get("PC_API_TOKEN", "")
 commands: dict[str, dict] = {}
 
 
-def command(name: str | None = None, description: str = "", confirm: bool = False):
+def command(name: str | None = None, description: str = "", confirm: bool = False,
+             primary: bool = False, undo: bool = False, hide: bool = False):
     """Register a function as a command/endpoint. confirm=True asks for a
-    tap-to-confirm in the UI before executing (for scary commands)."""
+    tap-to-confirm; primary=False hides it under "Other"; undo=True shows a
+    Cancel button in its result; hide=True keeps it callable but off the UI."""
     def decorator(func):
         cmd_name = (name or func.__name__).lower()
         params = []
@@ -64,6 +69,9 @@ def command(name: str | None = None, description: str = "", confirm: bool = Fals
             "description": description or (func.__doc__ or "").strip(),
             "params": params,
             "confirm": confirm,
+            "primary": primary,
+            "undo": undo,
+            "hide": hide,
         }
         return func
     return decorator
@@ -89,12 +97,55 @@ def _coerce(value: str, type_name: str):
     return value
 
 
-@command("sleep", "Put the computer to sleep (optionally after N seconds).", confirm=True)
+# Pending cancellable actions: cmd_name -> zero-arg cancel callback.
+pending: dict[str, callable] = {}
+_pending_lock = threading.Lock()
+
+
+def _register_pending(cmd_name: str, cancel_fn: callable):
+    with _pending_lock:
+        pending[cmd_name] = cancel_fn
+
+
+def _clear_pending(cmd_name: str):
+    with _pending_lock:
+        pending.pop(cmd_name, None)
+
+
+def cancel_pending(cmd_name: str | None = None) -> bool:
+    """Cancel one pending action (by name) or all of them. Returns True if
+    anything was cancelled."""
+    with _pending_lock:
+        names = [cmd_name] if cmd_name else list(pending)
+        if not names:
+            return False
+        for n in names:
+            fn = pending.pop(n, None)
+            if fn:
+                try:
+                    fn()
+                except Exception:
+                    pass
+        return True
+
+
+@command("sleep", "Put the computer to sleep (optionally after N seconds).", confirm=True, primary=True, undo=True)
 def sleep(seconds: int = 0):
     if seconds:
-        time.sleep(seconds)
-    ctypes.windll.powrprof.SetSuspendState(0, 0, 0)
+        def _fire():
+            _do_sleep()
+            _clear_pending("sleep")
+        timer = threading.Timer(seconds, _fire)
+        timer.daemon = True
+        timer.start()
+        _register_pending("sleep", timer.cancel)
+        return {"status": "sleeping_in", "seconds": seconds}
+    _do_sleep()
     return {"status": "sleeping"}
+
+
+def _do_sleep():
+    ctypes.windll.powrprof.SetSuspendState(0, 0, 0)
 
 
 @command("hibernate", "Hibernate the computer.", confirm=True)
@@ -103,37 +154,43 @@ def hibernate():
     return {"status": "hibernating"}
 
 
-@command("lock", "Lock the workstation.")
+@command("lock", "Lock the workstation.", primary=True)
 def lock():
     ctypes.windll.user32.LockWorkStation()
     return {"status": "locked"}
 
 
-@command("shutdown", "Shut the computer down (use force=true if needed).", confirm=True)
+@command("shutdown", "Shut the computer down (use force=true if needed).", confirm=True, primary=True, undo=True)
 def shutdown(force: bool = False, seconds: int = 0):
     flags = "/s" + (" /f" if force else "")
     subprocess.run(f"shutdown {flags} /t {seconds}", shell=True, check=True)
+    if seconds:
+        _register_pending("shutdown", lambda: subprocess.run("shutdown /a", shell=True))
+        threading.Timer(seconds, lambda: _clear_pending("shutdown")).start()
     return {"status": "shutting_down", "seconds": seconds}
 
 
-@command("restart", "Restart the computer.", confirm=True)
+@command("restart", "Restart the computer.", confirm=True, undo=True)
 def restart(force: bool = False, seconds: int = 0):
     flags = "/r" + (" /f" if force else "")
     subprocess.run(f"shutdown {flags} /t {seconds}", shell=True, check=True)
+    if seconds:
+        _register_pending("restart", lambda: subprocess.run("shutdown /a", shell=True))
+        threading.Timer(seconds, lambda: _clear_pending("restart")).start()
     return {"status": "restarting", "seconds": seconds}
 
 
-@command("cancel", "Cancel a pending shutdown/restart.")
-def cancel():
-    subprocess.run("shutdown /a", shell=True, check=True)
-    return {"status": "cancelled"}
+@command("cancel", "Cancel a pending shutdown/restart or sleep.", hide=True)
+def cancel(cmd: str | None = None):
+    cancelled = cancel_pending(cmd)
+    return {"status": "cancelled" if cancelled else "nothing_pending"}
 
 
 @command("status", "Return basic server/PC status.")
 def status():
     return {
         "status": "ok",
-        "uptime_s": int(time.monotonic()),
+        "uptime_s": int(time.time() - START_TIME),
         "commands": list(commands.keys()),
     }
 
@@ -213,8 +270,18 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized(query):
             return
         token = query.get("token", [TOKEN])[0]
-        cards = "".join(self._command_card(name, meta)
-                        for name, meta in commands.items())
+        visible = {n: m for n, m in commands.items() if not m.get("hide")}
+        primary = [self._command_card(n, m) for n, m in visible.items() if m.get("primary")]
+        other = [self._command_card(n, m) for n, m in visible.items() if not m.get("primary")]
+        other_section = ""
+        if other:
+            other_section = (
+                '<div class="other-btn" onclick="this.nextElementSibling'
+                '.classList.toggle(\'open\'); this.querySelector(\'.chev\')'
+                '.classList.toggle(\'open\')">Other<span class="chev"></span></div>'
+                '<div class="other">' + "".join(other) + '</div>'
+            )
+        cards = "".join(primary) + other_section
         html = f"""<!doctype html><html><head><meta name="viewport"
         content="width=device-width,initial-scale=1"><title>PC Remote</title>
         <meta name="color-scheme" content="dark"><style>
@@ -257,6 +324,23 @@ class Handler(BaseHTTPRequestHandler):
         .confirm button{{background:#dc2626;color:#fff;border:0;padding:.4rem .8rem;
         border-radius:6px;font-weight:600;cursor:pointer}}
         .confirm button.no{{background:#2a2f3a;color:#e6e6e6}}
+        .other-btn{{display:flex;align-items:center;gap:.5rem;margin-top:1rem;
+        padding:.6rem .9rem;border:1px solid #2a2f3a;border-radius:10px;
+        background:#171a21;cursor:pointer;user-select:none;color:#9aa4b2;
+        font-weight:600}}
+        .other-btn:hover{{background:#1d212b}}
+        .other-btn .chev{{width:8px;height:8px;border-right:2px solid #9aa4b2;
+        border-bottom:2px solid #9aa4b2;transform:rotate(-45deg);
+        transition:transform .18s ease;margin-left:auto}}
+        .other-btn .chev.open{{transform:rotate(45deg)}}
+        .other{{display:none;flex-direction:column;margin-top:.5rem}}
+        .other.open{{display:flex}}
+        .undo{{display:none;margin:.4rem .9rem .8rem}}
+        .undo.show{{display:block}}
+        .undo button{{background:#2a2f3a;color:#e6e6e6;border:1px solid #3a4150;
+        padding:.4rem .8rem;border-radius:6px;font-weight:600;cursor:pointer;
+        font-size:.85rem}}
+        .undo button:hover{{background:#222732}}
         </style></head>
         <body><h1>PC Remote Control</h1>{cards}
         <script>
@@ -283,6 +367,7 @@ class Handler(BaseHTTPRequestHandler):
           card.querySelector('.details').classList.add('open');
           const cw = card.querySelector('.chev-wrap'); if (cw) cw.classList.add('show');
           const ch = card.querySelector('.chev'); if (ch) ch.classList.add('open');
+          const u = card.querySelector('.undo'); if (u) u.classList.add('show');
         }}
         function onRow(card, cmd, needsConfirm, ev) {{
           if (needsConfirm) {{
@@ -294,6 +379,20 @@ class Handler(BaseHTTPRequestHandler):
         function doConfirm(card, cmd, yes) {{
           card.querySelector('.confirm').classList.remove('show');
           if (yes) run(card, cmd);
+        }}
+        async function doUndo(card, cmd) {{
+          const out = card.querySelector('.out');
+          try {{
+            const res = await fetch('/cancel?token=' + encodeURIComponent(TOKEN),
+              {{method:'POST', headers:{{'Content-Type':'application/json'}},
+               body: JSON.stringify({{cmd: cmd}})}});
+            const data = await res.json();
+            out.textContent = JSON.stringify(data, null, 2);
+            out.className = 'out show' + (res.ok ? '' : ' err');
+          }} catch (e) {{
+            out.textContent = String(e); out.className = 'out show err';
+          }}
+          card.querySelector('.undo').classList.remove('show');
         }}
         </script></body></html>"""
         body = html.encode("utf-8")
@@ -323,12 +422,15 @@ class Handler(BaseHTTPRequestHandler):
         chev = (f'<span class="{chev_cls}" onclick="event.stopPropagation();'
                 'toggleDetails(this.closest(\'.card\'))">'
                 '<span class="chev" title="details"></span></span>')
+        undo_box = (f'<div class="undo"><button onclick="doUndo('
+                    f'this.closest(\'.card\'), \'{name}\')">Cancel</button></div>'
+                    ) if meta.get("undo") else ""
         details = f'<div class="details">{fields}<div class="out"></div></div>'
         return (f'<div class="card"><div class="row" '
                 f'onclick="onRow(this.closest(\'.card\'), \'{name}\', '
                 f'{str(needs_confirm).lower()}, event)">'
                 f'<span class="name">{name}</span>{chev}'
-                f'</div>{details}{confirm_box}</div>')
+                f'</div>{details}{confirm_box}{undo_box}</div>')
 
     def log_message(self, *args):
         pass
