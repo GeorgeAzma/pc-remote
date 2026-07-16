@@ -260,9 +260,10 @@ class Handler(BaseHTTPRequestHandler):
         cursor:pointer;user-select:none}}
         .row:hover{{background:#1d212b}}
         .name{{font-weight:600;color:#4da3ff;font-size:1.05rem;flex:1}}
-        .chev-wrap{{display:flex;align-items:center;justify-content:center;
+        .chev-wrap{{display:none;align-items:center;justify-content:center;
         width:40px;height:40px;margin:-8px -8px -8px 0;border-radius:8px;
         flex:none;cursor:pointer}}
+        .chev-wrap.show{{display:flex}}
         .chev-wrap:hover{{background:#222732}}
         .chev{{width:8px;height:8px;border-right:2px solid #9aa4b2;
         border-bottom:2px solid #9aa4b2;transform:rotate(-45deg);
@@ -311,14 +312,15 @@ class Handler(BaseHTTPRequestHandler):
             out.textContent = String(e); out.className = 'out show err';
           }}
           card.querySelector('.details').classList.add('open');
-          card.querySelector('.chev').classList.add('open');
+          const cw = card.querySelector('.chev-wrap'); if (cw) cw.classList.add('show');
+          const ch = card.querySelector('.chev'); if (ch) ch.classList.add('open');
         }}
         function onRow(card, cmd, needsConfirm, ev) {{
           if (needsConfirm) {{
             const box = card.querySelector('.confirm');
             box.classList.add('show');
             card.querySelector('.details').classList.add('open');
-            card.querySelector('.chev').classList.add('open');
+            const ch = card.querySelector('.chev'); if (ch) ch.classList.add('open');
             return;
           }}
           run(card, cmd);
@@ -351,7 +353,11 @@ class Handler(BaseHTTPRequestHandler):
                        f'<button class="no" onclick="doConfirm(this.closest'
                        f'(\'.card\'), \'{name}\', false)">No</button></div>'
                        ) if needs_confirm else ""
-        chev = ('<span class="chev-wrap" onclick="event.stopPropagation();'
+        # Render the arrow always. For commands with parameters it shows
+        # immediately (so params are expandable); for param-less commands it
+        # stays hidden until a result exists (no empty expandable panel).
+        chev_cls = "chev-wrap show" if params else "chev-wrap"
+        chev = (f'<span class="{chev_cls}" onclick="event.stopPropagation();'
                 'toggleDetails(this.closest(\'.card\'))">'
                 '<span class="chev" title="details"></span></span>')
         details = f'<div class="details">{fields}<div class="out"></div></div>'
