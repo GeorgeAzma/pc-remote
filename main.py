@@ -28,13 +28,16 @@ Configuration (environment variables)
     PC_API_HOST   interface to bind   (default 0.0.0.0 = all interfaces)
     PC_API_PORT   listen port         (default 1024)
 """
+import asyncio
 import ctypes
 import inspect
 import json
 import os
+import queue
 import subprocess
 import threading
 import time
+from ctypes import wintypes
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -43,20 +46,250 @@ from urllib.parse import urlparse, parse_qs
 CREATE_NO_WINDOW = 0x08000000
 _SUBPROC_KWARGS = {"creationflags": CREATE_NO_WINDOW}
 
-# --- System master volume via winmm (WAVE_MAPPER maps to the default device) ---
-_WAVE_MAPPER = 0xFFFFFFFF  # -1: route to the system's preferred playback device
+# --- Coalescing live-setter worker ---------------------------------------
+# Live sliders (volume, brightness) fire a request on every drag tick. If the
+# hardware apply is slower than the drag, a plain FIFO queue makes the slider
+# lag behind the user as stale intermediate values are applied one by one.
+#
+# Each setter runs on a dedicated worker thread that owns its hardware handle
+# (e.g. the STA-bound winrt controller). A set request registers its value as
+# the "latest pending" and parks waiting for a reply. The worker applies only
+# the *newest* pending value, skipping any superseded while it was busy, and
+# releases those waiters immediately. So the latest drag always jumps ahead of
+# the queue and is applied as soon as the current apply finishes. Gets run on
+# the worker too (so they share the same thread-affine handle).
+class _CoalescingSetter:
+    def __init__(self, name: str):
+        self._name = name
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        self._pending: object | None = None   # newest un-applied set value
+        self._waiters: list = []               # [(value, Event, result_box)]
+        self._gets: list = []                  # [(Event, result_box)]
+        self._thread: threading.Thread | None = None
+        self._ready = False                     # setup() completed
+        self._setup_err: str | None = None
+
+    # --- to override / configure ---
+    def setup(self):
+        """Called once on the worker thread before serving. Own hardware here."""
+        pass
+
+    def apply(self, value):
+        """Apply one value to the hardware. Runs on the worker thread."""
+        raise NotImplementedError
+
+    def read(self):
+        """Read current value from the hardware. Runs on the worker thread."""
+        return None
+
+    # --- worker loop ---
+    def _worker(self):
+        try:
+            self.setup()
+        except Exception as exc:
+            with self._lock:
+                self._setup_err = repr(exc)
+                self._ready = True
+                self._cond.notify_all()
+            return
+        with self._lock:
+            self._ready = True
+            self._cond.notify_all()
+        while True:
+            with self._lock:
+                # Wait for a set or a get.
+                while self._pending is None and not self._gets:
+                    self._cond.wait()
+                value = self._pending
+                self._pending = None
+                waiters = self._waiters
+                self._waiters = []
+                gets = self._gets
+                self._gets = []
+            # Service gets first (cheap, and keeps reads fresh).
+            for ev, box in gets:
+                try:
+                    box[0] = ("ok", self.read())
+                except Exception as exc:
+                    box[0] = ("err", repr(exc))
+                ev.set()
+            # Apply the newest pending set value once.
+            if value is not None:
+                err = None
+                try:
+                    self.apply(value)
+                except Exception as exc:
+                    err = repr(exc)
+                for w_value, ev, box in waiters:
+                    box[0] = err if w_value is value else None
+                    ev.set()
+
+    def _ensure(self):
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._worker, name=self._name,
+                                        daemon=True)
+        self._thread.start()
+        # Wait for setup so callers see init errors instead of a silent hang.
+        with self._lock:
+            while not self._ready:
+                self._cond.wait()
+        if self._setup_err is not None:
+            raise RuntimeError(f"{self._name} setup failed: {self._setup_err}")
+
+    def set(self, value) -> None:
+        """Submit a value; block until it is applied or superseded."""
+        self._ensure()
+        ev = threading.Event()
+        box: list = [None]
+        with self._lock:
+            self._pending = value
+            self._waiters.append((value, ev, box))
+            self._cond.notify_all()
+        ev.wait(timeout=10)
+        if box[0] is not None:
+            raise RuntimeError(box[0])
+
+    def get(self):
+        """Read current value; runs on the worker thread."""
+        self._ensure()
+        ev = threading.Event()
+        box: list = [None]
+        with self._lock:
+            self._gets.append((ev, box))
+            self._cond.notify_all()
+        ev.wait(timeout=10)
+        status, detail = box[0]
+        if status == "err":
+            raise RuntimeError(detail)
+        return detail
 
 
-def _set_master_volume(level: int):
-    v = int(max(0, min(100, level)) / 100 * 0xFFFF)
-    vol = v | (v << 16)  # same level on left/right channels
-    ctypes.windll.winmm.waveOutSetVolume(_WAVE_MAPPER, vol)
+# --- System master volume via Windows.Media.Devices (winrt) ---
+# Core Audio COM (MMDeviceEnumerator) is not registered on this machine, and
+# the legacy winmm waveOut mixer does not move the real WASAPI system volume.
+# The UWP AudioDeviceController (obtained via a MediaCapture instance) does.
+# The controller is STA-bound, so it lives on the worker thread.
+class _VolumeSetter(_CoalescingSetter):
+    def setup(self):
+        import winrt.runtime
+        winrt.runtime.init_apartment(winrt.runtime.ApartmentType.SINGLE_THREADED)
+        import winrt.windows.media.capture as capture
+        import winrt.windows.media.devices as devices
+        self._loop = asyncio.new_event_loop()
+        # Bind MediaCapture to the default *render* endpoint so it works even
+        # when no capture device is present (MediaCapture otherwise demands one).
+        render_id = devices.MediaDevice.get_default_audio_render_id(
+            devices.AudioDeviceRole.DEFAULT)
+        settings = capture.MediaCaptureInitializationSettings()
+        settings.audio_device_id = render_id
+        settings.streaming_capture_mode = capture.StreamingCaptureMode.AUDIO
+        mc = capture.MediaCapture()
+        self._loop.run_until_complete(mc.initialize_with_settings_async(settings))
+        self._mc = mc  # keep MediaCapture alive or the controller gets closed
+        self._ctrl = mc.audio_device_controller
+
+    def apply(self, level):
+        self._ctrl.volume_percent = max(0.0, min(100.0, float(level)))
+
+    def read(self):
+        return int(round(self._ctrl.volume_percent))
+
+
+_VOL_SETTER = _VolumeSetter("volume")
+
+
+def _set_master_volume(level: int) -> None:
+    _VOL_SETTER.set(level)
 
 
 def _get_master_volume() -> int:
-    out = ctypes.c_ulong()
-    ctypes.windll.winmm.waveOutGetVolume(_WAVE_MAPPER, ctypes.byref(out))
-    return int(round((out.value & 0xFFFF) / 0xFFFF * 100))
+    return _VOL_SETTER.get()
+
+
+# --- Monitor brightness via DDC/CI (dxva2.dll) ---
+# WMI WmiMonitorBrightnessMethods is not supported on this display; DDC/CI
+# through dxva2.dll SetMonitorBrightness works (verified on Alienware AW2725DF).
+class _PHYSICAL_MONITOR(ctypes.Structure):
+    _fields_ = [("hPhysicalMonitor", ctypes.c_void_p),
+                ("szPhysicalMonitorDescription", ctypes.c_wchar * 128)]
+
+
+_user32 = ctypes.windll.user32
+_dxva2 = ctypes.windll.dxva2
+_dxva2.GetNumberOfPhysicalMonitorsFromHMONITOR.argtypes = [wintypes.HMONITOR,
+                                                           ctypes.POINTER(wintypes.DWORD)]
+_dxva2.GetNumberOfPhysicalMonitorsFromHMONITOR.restype = wintypes.BOOL
+_dxva2.GetPhysicalMonitorsFromHMONITOR.argtypes = [wintypes.HMONITOR, wintypes.DWORD,
+                                                   ctypes.POINTER(_PHYSICAL_MONITOR)]
+_dxva2.GetPhysicalMonitorsFromHMONITOR.restype = wintypes.BOOL
+_dxva2.DestroyPhysicalMonitors.argtypes = [wintypes.DWORD, ctypes.POINTER(_PHYSICAL_MONITOR)]
+_dxva2.DestroyPhysicalMonitors.restype = wintypes.BOOL
+_dxva2.SetMonitorBrightness.argtypes = [ctypes.c_void_p, wintypes.SHORT]
+_dxva2.SetMonitorBrightness.restype = wintypes.BOOL
+_dxva2.GetMonitorBrightness.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.SHORT),
+                                        ctypes.POINTER(wintypes.SHORT), ctypes.POINTER(wintypes.SHORT)]
+_dxva2.GetMonitorBrightness.restype = wintypes.BOOL
+
+
+def _primary_physical_monitor():
+    """Return (handle, pm_array) for the primary monitor, or (None, None)."""
+    hwnd = _user32.GetDesktopWindow()
+    hmon = _user32.MonitorFromWindow(hwnd, 1)  # MONITOR_DEFAULTTOPRIMARY
+    if not hmon:
+        return None, None
+    n = wintypes.DWORD(0)
+    if not _dxva2.GetNumberOfPhysicalMonitorsFromHMONITOR(hmon, ctypes.byref(n)) or n.value == 0:
+        return None, None
+    pm = (_PHYSICAL_MONITOR * n.value)()
+    if not _dxva2.GetPhysicalMonitorsFromHMONITOR(hmon, n.value, pm):
+        return None, None
+    return pm[0].hPhysicalMonitor, pm
+
+
+class _BrightnessSetter(_CoalescingSetter):
+    """DDC/CI brightness on the primary monitor, coalesced for live sliders."""
+    def apply(self, level):
+        handle, pm = _primary_physical_monitor()
+        if handle is None:
+            raise RuntimeError("no DDC/CI physical monitor")
+        try:
+            target = wintypes.SHORT(max(0, min(100, int(level))))
+            if not _dxva2.SetMonitorBrightness(handle, target):
+                raise RuntimeError("SetMonitorBrightness failed")
+        finally:
+            _dxva2.DestroyPhysicalMonitors(1, pm)
+
+    def read(self):
+        handle, pm = _primary_physical_monitor()
+        if handle is None:
+            return None
+        try:
+            cur = wintypes.SHORT(0)
+            minb = wintypes.SHORT(0)
+            maxb = wintypes.SHORT(0)
+            if _dxva2.GetMonitorBrightness(handle, ctypes.byref(minb),
+                                           ctypes.byref(cur), ctypes.byref(maxb)):
+                return int(cur.value)
+            return None
+        finally:
+            _dxva2.DestroyPhysicalMonitors(1, pm)
+
+
+_BRIGHTNESS_SETTER = _BrightnessSetter("brightness")
+
+
+def _set_brightness_ddc(level: int) -> bool:
+    try:
+        _BRIGHTNESS_SETTER.set(level)
+        return True
+    except Exception:
+        return False
+
+
+def _get_brightness_ddc() -> int | None:
+    return _BRIGHTNESS_SETTER.get()
 
 
 START_TIME = time.time()
@@ -86,14 +319,16 @@ POWERSHELL = _find_powershell()
 def command(name: str | None = None, description: str = "", confirm: bool = False,
              primary: bool = False, undo: bool = False, hide: bool = False,
              ping: bool = False, range: list[str] | None = None,
-             tab: str = "") -> callable:
+             tab: str = "", live: bool = False) -> callable:
     """Register a function as a command/endpoint. confirm=True asks for a
     tap-to-confirm; primary=True pins the card to the top of the UI;
     undo=True shows a Cancel button in its result; hide=True keeps it callable
     but off the UI; ping=True measures real client<->server latency in the UI;
     range=["param"] renders that int param as a 0-100 slider in the UI;
     tab="media"|"tools"|"power" groups non-primary commands under a
-    collapsible section of that name."""
+    collapsible section of that name; live=True fires the command immediately
+    whenever a parameter changes (slider drag, toggle, text input), instead of
+    waiting for a tap on the card."""
     def decorator(func):
         cmd_name = (name or func.__name__).lower()
         params = []
@@ -115,6 +350,7 @@ def command(name: str | None = None, description: str = "", confirm: bool = Fals
             "ping": ping,
             "range": set(range or []),
             "tab": tab,
+            "live": live,
         }
         return func
     return decorator
@@ -250,7 +486,7 @@ def cancel(cmd: str | None = None):
 
 # --- Display / media / clipboard commands ---
 
-@command("monitor", "Turn the monitor on or off.", tab="power")
+@command("monitor", "Turn the monitor on or off.", tab="power", live=True)
 def monitor(on: bool = False):
     HWND_BROADCAST = 0xFFFF
     WM_SYSCOMMAND = 0x0112
@@ -317,39 +553,21 @@ def paste(text: str = ""):
     return {"status": "copied", "length": len(text)}
 
 
-@command("brightness", "Set monitor brightness (0-100).", range=["level"], tab="media")
+@command("brightness", "Set monitor brightness (0-100).", range=["level"], tab="media", live=True)
 def brightness(level: int = 50):
     level = max(0, min(100, int(level)))
-    # Snap to a level the monitor actually supports (if discoverable).
-    ps = (
-        "$near = {level}; "
-        "try { "
-        "$b = Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightness "
-        "-ErrorAction Stop | Select-Object -First 1; "
-        "if ($b -and $b.Level) { "
-        "$near = ($b.Level | Sort-Object {[math]::Abs($_ - {level})} | "
-        "Select-Object -First 1) "
-        "} "
-        "} catch { } "
-        "Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightnessMethods "
-        "-ErrorAction Stop | ForEach-Object { $_.WmiSetBrightness(1, $near) }"
-    )
-    try:
-        subprocess.run([POWERSHELL, "-NoProfile", "-Command", ps], check=True,
-                       capture_output=True, text=True, **_SUBPROC_KWARGS)
-    except subprocess.CalledProcessError as exc:
-        msg = (exc.stderr or exc.stdout or str(exc)).strip().splitlines()
-        msg = msg[-1] if msg else "failed"
-        return {"status": "error", "detail": msg,
-                "hint": "monitor brightness may not be supported on this display"}
-    return {"status": "set", "level": level}
+    if _set_brightness_ddc(level):
+        return {"status": "set", "level": level}
+    return {"status": "error",
+            "detail": "DDC/CI brightness not supported on this display",
+            "hint": "enable DDC/CI in the monitor's OSD, or the display may not expose it"}
 
 
-@command("volume", "Set system volume (0-100).", range=["level"], tab="media")
+@command("volume", "Set system volume (0-100).", range=["level"], tab="media", live=True)
 def volume(level: int = 50):
     level = max(0, min(100, int(level)))
     _set_master_volume(level)
-    return {"status": "set", "volume": level}
+    return {"status": "set", "volume": _get_master_volume()}
 
 
 @command("play", "Toggle media play/pause.", tab="media")
@@ -360,7 +578,7 @@ def play():
     return {"status": "toggled"}
 
 
-@command("bluetooth", "Enable or disable the Bluetooth radio (needs admin).", tab="tools")
+@command("bluetooth", "Enable or disable the Bluetooth radio (needs admin).", tab="tools", live=True)
 def bluetooth(on: bool = True):
     verb = "Enable" if on else "Disable"
     ps = (f"$e = Get-PnpDevice -Class Bluetooth -ErrorAction Stop | "
@@ -378,7 +596,7 @@ def bluetooth(on: bool = True):
     return {"status": "bluetooth_" + ("on" if on else "off")}
 
 
-@command("wifi", "Enable or disable the Wi-Fi interface (needs admin).", tab="tools")
+@command("wifi", "Enable or disable the Wi-Fi interface (needs admin).", tab="tools", live=True)
 def wifi(on: bool = True):
     state = "enable" if on else "disable"
     ps = (f"netsh interface set interface name='Wi-Fi' admin={state}; "
@@ -555,6 +773,9 @@ class Handler(BaseHTTPRequestHandler):
         color:#9aa4b2}}
         .field input:not([type=checkbox]){{background:#0f1115;border:1px solid #2a2f3a;
         color:#e6e6e6;border-radius:6px;padding:.35rem .5rem;font-size:.85rem;width:5.5rem}}
+        .text-field{{flex:1 1 100%;flex-wrap:wrap}}
+        .text-field input{{flex:1 1 100%;width:100%;min-height:2.4rem;resize:vertical;
+        font-family:inherit;line-height:1.4}}
         .bool-field{{gap:.5rem}}
         .out{{padding:.5rem .6rem;border-radius:6px;background:#0f1115;
         border:1px solid #2a2f3a;font-family:ui-monospace,monospace;
@@ -587,7 +808,7 @@ class Handler(BaseHTTPRequestHandler):
         font-size:.85rem}}
         .undo button:hover{{background:#222732}}
         .out img{{max-width:100%;border-radius:6px;display:block}}
-        .slider{{display:flex;align-items:center;gap:.7rem;margin:.15rem 0}}
+        .slider{{display:flex;align-items:center;gap:.5rem;margin:.15rem 0;flex:1 1 100%}}
         .slider input[type=range]{{flex:1;width:100%;height:6px;-webkit-appearance:none;
         appearance:none;background:#2a2f3a;border-radius:3px;outline:none;cursor:pointer}}
         .slider input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;
@@ -596,7 +817,7 @@ class Handler(BaseHTTPRequestHandler):
         .slider input[type=range]::-moz-range-thumb{{width:18px;height:18px;
         border-radius:50%;background:#4da3ff;cursor:pointer;border:2px solid #0f1115}}
         .slider .val{{min-width:2.5rem;text-align:right;color:#e6e6e6;font-size:.85rem;
-        font-variant-numeric:tabular-nums}}
+        font-variant-numeric:tabular-nums;flex:none}}
         .bool-field{{display:flex;align-items:center;justify-content:space-between;
         gap:.6rem;font-size:.85rem;color:#9aa4b2}}
         .switch{{position:relative;display:inline-block;width:44px;height:24px;flex:none}}
@@ -630,41 +851,28 @@ class Handler(BaseHTTPRequestHandler):
           await fetch(url, opts);
           return performance.now() - t;
         }}
-        async function run(card, cmd) {{
-          const out = card.querySelector('.out');
+        // Read the current input values of a card into a body object.
+        function readInputs(card) {{
           const inputs = card.querySelectorAll('.details input');
           const body = {{}};
           inputs.forEach(i => {{
             if (i.type === 'checkbox') {{ body[i.name] = i.checked; }}
             else if (i.value !== '') {{ body[i.name] = i.value; }}
           }});
-          const isPing = card.querySelector('.ping-flag') !== null;
-          let data = null;
-          let ok = true;
-          try {{
-            if (isPing) {{
-              const ms = await measureLatency(cmd);
-              out.textContent = fmtMs(ms) + 'ms';
-            }} else {{
-              const res = await fetch('/' + cmd + '?token=' + encodeURIComponent(TOKEN),
-                {{method:'POST', headers:{{'Content-Type':'application/json'}},
-                 body: JSON.stringify(body)}});
-              data = await res.json();
-              ok = res.ok;
-              if (data.result && data.result.image) {{
-                out.textContent = '';
-                const img = document.createElement('img');
-                img.src = 'data:image/png;base64,' + data.result.image;
-                out.appendChild(img);
-              }} else if (data.result && 'text' in data.result) {{
-                out.textContent = data.result.text || '(empty clipboard)';
-              }} else {{
-                out.textContent = JSON.stringify(data, null, 2);
-              }}
-            }}
-          }} catch (e) {{
-            ok = false;
-            out.textContent = String(e);
+          return body;
+        }}
+        // Render a response into the card's output area.
+        function renderResult(card, data, ok) {{
+          const out = card.querySelector('.out');
+          if (data && data.result && data.result.image) {{
+            out.textContent = '';
+            const img = document.createElement('img');
+            img.src = 'data:image/png;base64,' + data.result.image;
+            out.appendChild(img);
+          }} else if (data && data.result && 'text' in data.result) {{
+            out.textContent = data.result.text || '(empty clipboard)';
+          }} else {{
+            out.textContent = JSON.stringify(data, null, 2);
           }}
           out.className = 'out show' + (ok ? '' : ' err');
           card.querySelector('.details').classList.add('open');
@@ -673,12 +881,61 @@ class Handler(BaseHTTPRequestHandler):
           const u = card.querySelector('.undo');
           if (u && data && data.result && data.result.seconds > 0) u.classList.add('show');
         }}
+        // run() keeps at most ONE request in flight per card. If a new change
+        // arrives while one is in flight, it is stashed as "pending" and sent
+        // the instant the in-flight one returns. This avoids the browser's
+        // ~6-connection-per-host limit queueing stale slider values, while
+        // never delaying the latest value and never dropping the final one.
+        async function run(card, cmd) {{
+          if (card._inFlight) {{ card._pending = true; return; }}
+          const isPing = card.querySelector('.ping-flag') !== null;
+          while (true) {{
+            const body = readInputs(card);
+            card._inFlight = true;
+            card._pending = false;
+            let data = null, ok = true;
+            try {{
+              if (isPing) {{
+                const ms = await measureLatency(cmd);
+                data = {{ result: {{ ms: ms }} }}; ok = true;
+                card.querySelector('.out').textContent = fmtMs(ms) + 'ms';
+              }} else {{
+                const res = await fetch('/' + cmd + '?token=' + encodeURIComponent(TOKEN),
+                  {{method:'POST', headers:{{'Content-Type':'application/json'}},
+                   body: JSON.stringify(body)}});
+                data = await res.json();
+                ok = res.ok;
+                renderResult(card, data, ok);
+              }}
+            }} catch (e) {{
+              ok = false;
+              card.querySelector('.out').textContent = String(e);
+              card.querySelector('.out').className = 'out show err';
+            }}
+            card._inFlight = false;
+            // If a newer change arrived while we were busy, loop and send it
+            // immediately. Otherwise we're done.
+            if (!card._pending) break;
+          }}
+        }}
         function onRow(card, cmd, needsConfirm, ev) {{
           if (needsConfirm) {{
             card.querySelector('.confirm').classList.add('show');
             return;
           }}
           run(card, cmd);
+        }}
+        function wireLive(card, cmd) {{
+          if (card.dataset.live !== 'true') return;
+          const inputs = card.querySelectorAll('.details input');
+          inputs.forEach(i => {{
+            i.addEventListener('input', () => {{
+              card.querySelector('.details').classList.add('open');
+              const cw = card.querySelector('.chev-wrap'); if (cw) cw.classList.add('show');
+              const ch = card.querySelector('.chev'); if (ch) ch.classList.add('open');
+              run(card, cmd);
+            }});
+          }});
         }}
         function doConfirm(card, cmd, yes) {{
           card.querySelector('.confirm').classList.remove('show');
@@ -716,6 +973,9 @@ class Handler(BaseHTTPRequestHandler):
           }} catch (e) {{}}
         }}
         syncPending();
+        document.querySelectorAll('.card[data-live="true"]').forEach(card => {{
+          wireLive(card, card.dataset.cmd);
+        }});
         </script></body></html>"""
         body = html.encode("utf-8")
         self.send_response(200)
@@ -743,7 +1003,8 @@ class Handler(BaseHTTPRequestHandler):
                         f'<span class="track"></span></span></label>')
             itype = "number" if p["type"] in ("int", "float") else "text"
             ph = p["default"] if p["has_default"] else ""
-            return (f'<label class="field">{nm}'
+            cls = "field text-field" if p["type"] == "str" else "field"
+            return (f'<label class="{cls}">{nm}'
                     f'<input name="{nm}" type="{itype}" placeholder="{ph}"></label>')
         fields = "".join(_field(p) for p in params)
         confirm_box = (f'<div class="confirm">Are you sure? '
@@ -761,7 +1022,8 @@ class Handler(BaseHTTPRequestHandler):
                     ) if meta.get("undo") else ""
         ping_flag = '<span class="ping-flag" style="display:none"></span>' if meta.get("ping") else ""
         details = f'<div class="details">{fields}<div class="out"></div></div>'
-        return (f'<div class="card" data-cmd="{name}"><div class="row" '
+        live = "true" if meta.get("live") else "false"
+        return (f'<div class="card" data-cmd="{name}" data-live="{live}"><div class="row" '
                 f'onclick="onRow(this.closest(\'.card\'), \'{name}\', '
                 f'{str(needs_confirm).lower()}, event)">'
                 f'<span class="name">{name}</span>{chev}{ping_flag}'
