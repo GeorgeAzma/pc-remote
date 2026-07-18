@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Personal PC Remote Control Server
-=================================
+Personal Server
+================
 
 A tiny, dependency-free HTTP server that lets you trigger actions on your PC
 from your phone (or any device on the network). It is designed to be
@@ -436,25 +436,6 @@ def _set_last(cmd: str):
         LAST_COMMAND = cmd
 
 
-@command("sleep", "Put the computer to sleep (optionally after N seconds).", confirm=True, primary=True, undo=True)
-def sleep(seconds: int = 0):
-    if seconds:
-        def _fire():
-            _do_sleep()
-            _clear_pending("sleep")
-        timer = threading.Timer(seconds, _fire)
-        timer.daemon = True
-        timer.start()
-        _register_pending("sleep", timer.cancel)
-        return {"status": "sleeping_in", "seconds": seconds}
-    _do_sleep()
-    return {"status": "sleeping"}
-
-
-def _do_sleep():
-    ctypes.windll.powrprof.SetSuspendState(0, 0, 0)
-
-
 @command("hibernate", "Hibernate the computer.", confirm=True, tab="power")
 def hibernate():
     ctypes.windll.powrprof.SetSuspendState(1, 0, 0)
@@ -467,7 +448,7 @@ def lock():
     return {"status": "locked"}
 
 
-@command("shutdown", "Shut the computer down (use force=true if needed).", confirm=True, primary=True, undo=True)
+@command("shutdown", "Shut the computer down (use force=true if needed).", confirm=True, undo=True, tab="power")
 def shutdown(force: bool = False, seconds: int = 0):
     flags = "/s" + (" /f" if force else "")
     subprocess.run(f"shutdown {flags} /t {seconds}", shell=True, check=True)
@@ -534,11 +515,6 @@ def _capture_screen_b64() -> str:
                          capture_output=True, text=True, check=True,
                          **_SUBPROC_KWARGS)
     return out.stdout.strip()
-
-
-@command("screenshot", "Capture the screen and return the image.", primary=True)
-def screenshot():
-    return {"image": _capture_screen_b64()}
 
 
 # --- Fast dependency-free screen capture (GDI+ via ctypes) ---
@@ -1226,6 +1202,11 @@ def trackpad():
     return {"status": "ready"}
 
 
+@command("screenshot", "Capture the screen and return the image.", primary=True)
+def screenshot():
+    return {"image": _capture_screen_b64()}
+
+
 # --- Interactive terminal via ConPTY (Windows pseudo-console) ---
 # ConPTY gives a real PTY, so the shell renders its own prompt, colors,
 # cursor, and tab-completion exactly as in a real terminal. We spawn
@@ -1552,8 +1533,27 @@ def list_commands():
     }
 
 
+@command("sleep", "Put the computer to sleep (optionally after N seconds).", confirm=True, primary=True, undo=True)
+def sleep(seconds: int = 0):
+    if seconds:
+        def _fire():
+            _do_sleep()
+            _clear_pending("sleep")
+        timer = threading.Timer(seconds, _fire)
+        timer.daemon = True
+        timer.start()
+        _register_pending("sleep", timer.cancel)
+        return {"status": "sleeping_in", "seconds": seconds}
+    _do_sleep()
+    return {"status": "sleeping"}
+
+
+def _do_sleep():
+    ctypes.windll.powrprof.SetSuspendState(0, 0, 0)
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "PCRemote/1.0"
+    server_version = "PC/1.0"
     protocol_version = "HTTP/1.1"  # keep-alive: reuse one connection for all pings
 
     def _send(self, code: int, payload):
@@ -2014,7 +2014,7 @@ class Handler(BaseHTTPRequestHandler):
             )
         cards = "".join(primary) + tab_sections
         html = f"""<!doctype html><html><head><meta name="viewport"
-        content="width=device-width,initial-scale=1"><title>PC Remote</title>
+        content="width=device-width,initial-scale=1"><title>PC</title>
         <meta charset="utf-8">
         <meta name="color-scheme" content="dark"><style>
         :root{{color-scheme:dark}}
@@ -2174,7 +2174,7 @@ class Handler(BaseHTTPRequestHandler):
         padding:.4rem .8rem;border-radius:6px;font-weight:600;cursor:pointer;
         font-size:.8rem}}
         </style></head>
-        <body><h1>PC Remote Control</h1>{cards}
+        <body><h1>PC</h1>{cards}
         <script>
         const TOKEN = {json.dumps(token)};
         function toggleDetails(card) {{
@@ -2990,7 +2990,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"PC Remote server listening on http://{HOST}:{PORT}")
+    print(f"Server listening on http://{HOST}:{PORT}")
     if not TOKEN:
         print("WARNING: no PC_API_TOKEN set - server is open on your network!")
     try:
