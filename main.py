@@ -2551,13 +2551,17 @@ class Handler(BaseHTTPRequestHandler):
             }}
             lastTap = now;
           }}, {{passive:false}});
-          // Wire up the stream checkbox (pause/resume via control message)
+          // Wire up the stream checkbox (pause/resume via control message).
+          // Uses card._streamWs (the live socket) rather than the captured
+          // `sw` closure, so pause/resume still works after the stream
+          // auto-reconnects with a new WebSocket instance.
           const cb = card.querySelector('#tp-stream');
           if (cb && !cb.dataset.streamWired) {{
             cb.dataset.streamWired = '1';
             cb.addEventListener('change', () => {{
-              if (sw.readyState === 1)
-                sw.send(JSON.stringify({{m: cb.checked ? 'resume' : 'pause'}}));
+              const sock = card._streamWs;
+              if (sock && sock.readyState === 1)
+                sock.send(JSON.stringify({{m: cb.checked ? 'resume' : 'pause'}}));
               badge.textContent = cb.checked ? 'live' : 'paused';
               badge.style.background = cb.checked
                 ? 'rgba(34,197,94,.6)' : 'rgba(91,100,115,.6)';
