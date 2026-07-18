@@ -46,6 +46,17 @@ from urllib.parse import urlparse, parse_qs
 CREATE_NO_WINDOW = 0x08000000
 _SUBPROC_KWARGS = {"creationflags": CREATE_NO_WINDOW}
 
+# Make the process DPI-aware so screen capture gets the real physical
+# resolution (e.g. 2560x1440) instead of the scaled logical size (2048x1152).
+# Must be set before any GetSystemMetrics call and can only be set once.
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_AWARE
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
 # --- Coalescing live-setter worker ---------------------------------------
 # Live sliders (volume, brightness) fire a request on every drag tick. If the
 # hardware apply is slower than the drag, a plain FIFO queue makes the slider
@@ -638,10 +649,6 @@ def _capture_screen_jpeg(quality: int = 55, max_w: int = 1280) -> bytes:
     user32 = ctypes.windll.user32
     gdi32 = ctypes.windll.gdi32
     gdi = ctypes.windll.gdiplus
-    # Make the call DPI-aware so GetSystemMetrics returns the real physical
-    # screen size (otherwise on a scaled display it returns the logical size
-    # while the DC is at physical resolution, causing a zoomed-in capture).
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_AWARE
     sw = user32.GetSystemMetrics(0)
     sh = user32.GetSystemMetrics(1)
     if sw <= 0 or sh <= 0:
@@ -710,6 +717,214 @@ def _capture_screen_jpeg(quality: int = 55, max_w: int = 1280) -> bytes:
         except OSError:
             pass
     return data
+
+
+# --- Efficient screen streaming with change detection ---
+# Optimizations vs the old /stream HTTP polling:
+#   1. Server-push over WebSocket — no per-frame HTTP header overhead
+#   2. Change detection — samples pixels via GetDIBits and skips JPEG
+#      encoding entirely when the screen hasn't changed (saves ~30ms/frame)
+#   3. Downscaling — StretchBlt to max_w before encoding (4x smaller payload)
+#   4. In-memory JPEG via IStream — no temp file disk I/O
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
+                ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
+                ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+                ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
+                ("biClrImportant", wintypes.DWORD)]
+
+
+_ole32 = ctypes.windll.ole32
+_ole32.CreateStreamOnHGlobal.argtypes = [ctypes.c_void_p, wintypes.BOOL,
+                                          ctypes.POINTER(ctypes.c_void_p)]
+_ole32.CreateStreamOnHGlobal.restype = ctypes.c_long  # HRESULT
+_ole32.GetHGlobalFromStream.argtypes = [ctypes.c_void_p,
+                                         ctypes.POINTER(ctypes.c_void_p)]
+_ole32.GetHGlobalFromStream.restype = ctypes.c_long
+
+_k32 = ctypes.windll.kernel32
+_k32.GlobalLock.argtypes = [ctypes.c_void_p]
+_k32.GlobalLock.restype = ctypes.c_void_p
+_k32.GlobalSize.argtypes = [ctypes.c_void_p]
+_k32.GlobalSize.restype = ctypes.c_size_t
+_k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+_k32.GlobalUnlock.restype = wintypes.BOOL
+
+_gdi32 = ctypes.windll.gdi32
+_gdi32.GetDIBits.argtypes = [wintypes.HDC, ctypes.c_void_p, wintypes.UINT,
+                            wintypes.UINT, ctypes.c_void_p,
+                            ctypes.POINTER(_BITMAPINFOHEADER), wintypes.UINT]
+_gdi32.GetDIBits.restype = wintypes.INT
+_gdi32.SetStretchBltMode.argtypes = [wintypes.HDC, ctypes.c_int]
+_gdi32.SetStretchBltMode.restype = ctypes.c_int
+_gdi32.StretchBlt.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int,
+                             ctypes.c_int, ctypes.c_int, wintypes.HDC,
+                             ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                             ctypes.c_int, wintypes.DWORD]
+_gdi32.StretchBlt.restype = wintypes.BOOL
+
+_user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+_user32.GetCursorPos.restype = wintypes.BOOL
+
+
+def _release_com(obj):
+    """Call IUnknown::Release on a COM object via its vtable."""
+    try:
+        if not obj or not obj.value:
+            return
+        vtable_addr = ctypes.c_void_p.from_address(obj.value).value
+        if not vtable_addr:
+            return
+        # Release is vtable[2] = offset 16 on x64
+        release_addr = ctypes.c_void_p.from_address(vtable_addr + 16).value
+        if not release_addr:
+            return
+        fn = ctypes.WINFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p)(release_addr)
+        fn(obj)
+    except Exception:
+        pass
+
+
+def _encode_jpeg_memory(bmp, quality):
+    """Encode a GDI+ bitmap as JPEG bytes in memory via IStream (no disk I/O).
+    Returns None on failure."""
+    gdi = ctypes.windll.gdiplus
+    class _GUID(ctypes.Structure):
+        _fields_ = [("Data1", ctypes.c_uint32), ("Data2", ctypes.c_uint16),
+                    ("Data3", ctypes.c_uint16), ("Data4", ctypes.c_ubyte * 8)]
+    enc = _GUID(0x557CF401, 0x1A04, 0x11D3,
+                (ctypes.c_ubyte * 8)(0x9A, 0x73, 0x00, 0x00, 0xF8, 0x1E, 0xF3, 0x2E))
+    class _EP(ctypes.Structure):
+        _fields_ = [("Guid", _GUID), ("NumberOfValues", ctypes.c_uint32),
+                    ("Type", ctypes.c_uint32), ("Value", ctypes.c_void_p)]
+    class _EPS(ctypes.Structure):
+        _fields_ = [("Count", ctypes.c_uint32), ("Parameter", _EP)]
+    params = _EPS()
+    params.Count = 1
+    params.Parameter.Guid = _GUID(0x1D5BE4B5, 0xFA4A, 0x4520,
+        (ctypes.c_ubyte * 8)(0x9B, 0x3C, 0x18, 0x1A, 0x0E, 0x77, 0x0A, 0x07))
+    params.Parameter.NumberOfValues = 1
+    params.Parameter.Type = 1
+    q = ctypes.c_uint32(max(1, min(100, int(quality))))
+    params.Parameter.Value = ctypes.cast(ctypes.pointer(q), ctypes.c_void_p)
+    stream = ctypes.c_void_p(0)
+    hr = _ole32.CreateStreamOnHGlobal(None, True, ctypes.byref(stream))
+    if hr != 0 or not stream.value:
+        return None
+    gdi.GdipSaveImageToStream.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                          ctypes.c_void_p, ctypes.c_void_p]
+    gdi.GdipSaveImageToStream.restype = ctypes.c_int
+    status = gdi.GdipSaveImageToStream(bmp, stream, ctypes.byref(enc),
+                                       ctypes.byref(params))
+    if status != 0:
+        _release_com(stream)
+        return None
+    hg = ctypes.c_void_p(0)
+    _ole32.GetHGlobalFromStream(stream, ctypes.byref(hg))
+    if not hg.value:
+        _release_com(stream)
+        return None
+    size = _k32.GlobalSize(hg)
+    ptr = _k32.GlobalLock(hg)
+    if not ptr:
+        _release_com(stream)
+        return None
+    try:
+        data = ctypes.string_at(ptr, size)
+    finally:
+        _k32.GlobalUnlock(hg)
+    _release_com(stream)
+    return data
+
+
+class _ScreenStreamer:
+    """Efficient screen capture with change detection and downscaling.
+
+    Only encodes a JPEG when the screen content has changed (sampled pixel
+    comparison via GetDIBits), and downscales to max_w before encoding to
+    reduce both encode time and payload size. Designed for server-push over
+    WebSocket — the server pushes frames as fast as it can capture them.
+    """
+
+    def __init__(self):
+        self._prev_sample = b""
+        self._prev_cursor = (-1, -1)
+        self._buf = None
+
+    def get_frame(self, quality=50, max_w=1280):
+        """Return JPEG bytes if the screen changed, or None if unchanged."""
+        _init_gdi()
+        gdi = ctypes.windll.gdiplus
+        sw = _user32.GetSystemMetrics(0)
+        sh = _user32.GetSystemMetrics(1)
+        if sw <= 0 or sh <= 0:
+            return None
+        # Check cursor position (cheap — skip full compare if nothing moved)
+        pt = wintypes.POINT()
+        _user32.GetCursorPos(ctypes.byref(pt))
+        cursor_pos = (pt.x, pt.y)
+        # Capture screen + cursor
+        hdc = _user32.GetDC(0)
+        mdc = _gdi32.CreateCompatibleDC(hdc)
+        hbmp = _gdi32.CreateCompatibleBitmap(hdc, sw, sh)
+        _gdi32.SelectObject(mdc, hbmp)
+        _gdi32.BitBlt(mdc, 0, 0, sw, sh, hdc, 0, 0, 0x00CC0020)
+        _user32.ReleaseDC(0, hdc)
+        # Change detection: sample pixels BEFORE drawing the cursor (the
+        # cursor sprite can blink/anti-alias and cause false positives).
+        bi = _BITMAPINFOHEADER()
+        bi.biSize = ctypes.sizeof(bi)
+        bi.biWidth = sw
+        bi.biHeight = sh
+        bi.biPlanes = 1
+        bi.biBitCount = 32
+        bi.biCompression = 0  # BI_RGB
+        buf_size = sw * sh * 4
+        if self._buf is None or len(self._buf) < buf_size:
+            self._buf = (ctypes.c_ubyte * buf_size)()
+        _gdi32.GetDIBits(mdc, hbmp, 0, sh, self._buf, ctypes.byref(bi), 0)
+        sample = bytes(self._buf[::4096])
+        changed = (sample != self._prev_sample or
+                   cursor_pos != self._prev_cursor)
+        self._prev_sample = sample
+        self._prev_cursor = cursor_pos
+        if not changed:
+            _gdi32.DeleteObject(hbmp)
+            _gdi32.DeleteDC(mdc)
+            return None
+        # Draw the cursor only when we're actually sending a frame.
+        _draw_cursor(mdc, scale=2)
+        # Downscale if screen is wider than max_w (0 = no downscale)
+        if max_w > 0 and sw > max_w:
+            out_w = max_w
+            out_h = int(sh * max_w / sw)
+            hdc2 = _user32.GetDC(0)
+            mdc2 = _gdi32.CreateCompatibleDC(hdc2)
+            hbmp2 = _gdi32.CreateCompatibleBitmap(hdc2, out_w, out_h)
+            _user32.ReleaseDC(0, hdc2)
+            _gdi32.SelectObject(mdc2, hbmp2)
+            _gdi32.SetStretchBltMode(mdc2, 3)  # HALFTONE
+            _gdi32.StretchBlt(mdc2, 0, 0, out_w, out_h, mdc, 0, 0, sw, sh,
+                              0x00CC0020)
+            _gdi32.DeleteObject(hbmp)
+            _gdi32.DeleteDC(mdc)
+            mdc, hbmp, sw, sh = mdc2, hbmp2, out_w, out_h
+        # Create GDI+ bitmap and encode JPEG in memory
+        gdi.GdipCreateBitmapFromHBITMAP.argtypes = [ctypes.c_void_p,
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+        gdi.GdipCreateBitmapFromHBITMAP.restype = ctypes.c_int
+        bmp = ctypes.c_void_p(0)
+        status = gdi.GdipCreateBitmapFromHBITMAP(hbmp, None, ctypes.byref(bmp))
+        _gdi32.DeleteObject(hbmp)
+        _gdi32.DeleteDC(mdc)
+        if status != 0 or not bmp.value:
+            return None
+        data = _encode_jpeg_memory(bmp, quality)
+        gdi.GdipDisposeImage.argtypes = [ctypes.c_void_p]
+        gdi.GdipDisposeImage(bmp)
+        return data
 
 
 # --- Mouse control (for the trackpad) ---
@@ -1337,6 +1552,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, list_commands())
         if route == "/stream":
             return self._serve_stream(query)
+        if route == "/vstream":
+            return self._handle_vstream_ws(query)
         if route == "/ws":
             return self._handle_ws(query)
         if route == "/term":
@@ -1527,6 +1744,89 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             pump_stop.set()
             session.close()
+
+    def _handle_vstream_ws(self, query: dict):
+        """WebSocket endpoint for efficient server-push screen streaming.
+
+        The server runs a capture loop that pushes JPEG frames as binary WS
+        messages whenever the screen changes. The client never requests — it
+        just receives. This eliminates per-frame HTTP overhead and allows the
+        server to skip encoding entirely when the screen is static.
+        """
+        if not self._authorized(query):
+            return
+        import hashlib
+        import base64
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        if not key:
+            self.send_response(400)
+            self.end_headers()
+            return
+        accept = base64.b64encode(
+            hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode())
+            .digest()).decode()
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.end_headers()
+        quality = [int(query.get("q", [50])[0])]
+        max_w = [int(query.get("w", [1024])[0])]
+        paused = [False]
+        streamer = _ScreenStreamer()
+        stop = threading.Event()
+
+        def capture_loop():
+            # Adaptive polling: when the screen is static, back off to
+            # checking once per second (near-zero CPU). When changes are
+            # detected, poll at full speed (~30fps). This keeps idle CPU
+            # near 0 instead of burning ~30 captures/sec for nothing.
+            idle_interval = 1.0    # when nothing changes
+            active_interval = 0.033  # ~30fps when screen is active
+            interval = idle_interval
+            while not stop.is_set():
+                if paused[0]:
+                    time.sleep(0.1)
+                    continue
+                frame = streamer.get_frame(quality[0], max_w[0])
+                if frame is not None:
+                    try:
+                        self._ws_write_frame(self.wfile, frame, opcode=0x2)
+                    except (OSError, ValueError):
+                        stop.set()
+                        break
+                    interval = active_interval  # screen active — poll fast
+                else:
+                    # Screen unchanged — back off toward idle.
+                    interval = min(interval * 1.5, idle_interval)
+                time.sleep(interval)
+
+        cap = threading.Thread(target=capture_loop, daemon=True)
+        cap.start()
+        try:
+            while True:
+                opcode, payload = self._ws_read_frame(self.rfile)
+                if opcode is None or opcode == 0x8:
+                    break
+                if opcode == 0x1:  # text = JSON control message
+                    try:
+                        msg = json.loads(payload.decode("utf-8"))
+                        m = msg.get("m")
+                        if m == "pause":
+                            paused[0] = True
+                        elif m == "resume":
+                            paused[0] = False
+                        elif m == "set":
+                            if "q" in msg:
+                                quality[0] = int(msg["q"])
+                            if "w" in msg:
+                                max_w[0] = int(msg["w"])
+                    except Exception:
+                        pass
+        except (OSError, ValueError, _struct.error):
+            pass
+        finally:
+            stop.set()
 
     def _serve_stream(self, query: dict):
         """Single-frame screen capture as JPEG. The trackpad polls this."""
@@ -1741,7 +2041,7 @@ class Handler(BaseHTTPRequestHandler):
         .trackpad.open{{display:flex}}
         .trackpad .preview{{position:relative;width:100%;background:#000;
         border:1px solid #2a2f3a;border-radius:8px;overflow:hidden;
-        line-height:0}}
+        line-height:0;flex-shrink:0}}
         .trackpad .preview img{{width:100%;height:auto;display:block}}
         .trackpad .preview .badge{{position:absolute;top:6px;left:8px;
         font-size:.7rem;color:#9aa4b2;background:rgba(0,0,0,.5);padding:1px 6px;
@@ -2095,43 +2395,58 @@ class Handler(BaseHTTPRequestHandler):
           const fpsEl = card.querySelector('#tp-fps');
           tpFpsT = performance.now(); tpFpsN = 0;
           let lastUrl = null;
-          const loop = async () => {{
-            if (!tpStreamOn) return;
-            const cb = document.querySelector('.card[data-cmd="trackpad"]');
-            if (!cb || !cb.querySelector('.trackpad.open')) {{ tpStreamOn = false; return; }}
-            if (card.querySelector('#tp-stream').checked) {{
-              try {{
-                const r = await fetch('/stream?token=' + encodeURIComponent(TOKEN)
-                  + '&q=50&w=1024', {{cache:'no-store'}});
-                if (r.ok) {{
-                  const blob = await r.blob();
-                  if (lastUrl) URL.revokeObjectURL(lastUrl);
-                  lastUrl = URL.createObjectURL(blob);
-                  tpImg.src = lastUrl;
-                  tpFpsN++;
-                  const now = performance.now();
-                  if (now - tpFpsT > 1000) {{
-                    fpsEl.textContent = tpFpsN + ' fps';
-                    tpFpsN = 0; tpFpsT = now;
-                  }}
-                  badge.textContent = 'live';
-                  badge.style.background = 'rgba(34,197,94,.6)';
-                }}
-              }} catch (e) {{
-                badge.textContent = 'reconnecting…';
-                badge.style.background = 'rgba(220,38,38,.6)';
-              }}
-            }} else {{
-              badge.textContent = 'paused';
-              badge.style.background = 'rgba(91,100,115,.6)';
-            }}
-            if (tpStreamOn) requestAnimationFrame(loop);
+          const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+          const sw = new WebSocket(proto + '//' + location.host + '/vstream?token='
+            + encodeURIComponent(TOKEN) + '&q=75&w=0');
+          sw.binaryType = 'arraybuffer';
+          card._streamWs = sw;
+          sw.onopen = () => {{
+            badge.textContent = 'live';
+            badge.style.background = 'rgba(34,197,94,.6)';
           }};
-          loop();
+          sw.onclose = () => {{
+            badge.textContent = 'disconnected';
+            badge.style.background = 'rgba(91,100,115,.6)';
+            if (tpStreamOn && card.querySelector('.trackpad.open'))
+              setTimeout(() => startStream(card), 1000);
+          }};
+          sw.onerror = () => {{
+            badge.textContent = 'error';
+            badge.style.background = 'rgba(220,38,38,.6)';
+          }};
+          sw.onmessage = (ev) => {{
+            if (!(ev.data instanceof ArrayBuffer)) return;
+            if (lastUrl) URL.revokeObjectURL(lastUrl);
+            lastUrl = URL.createObjectURL(new Blob([ev.data], {{type:'image/jpeg'}}));
+            tpImg.src = lastUrl;
+            tpFpsN++;
+            const now = performance.now();
+            if (now - tpFpsT > 1000) {{
+              fpsEl.textContent = tpFpsN + ' fps';
+              tpFpsN = 0; tpFpsT = now;
+            }}
+          }};
+          // Wire up the stream checkbox (pause/resume via control message)
+          const cb = card.querySelector('#tp-stream');
+          if (cb && !cb.dataset.streamWired) {{
+            cb.dataset.streamWired = '1';
+            cb.addEventListener('change', () => {{
+              if (sw.readyState === 1)
+                sw.send(JSON.stringify({{m: cb.checked ? 'resume' : 'pause'}}));
+              badge.textContent = cb.checked ? 'live' : 'paused';
+              badge.style.background = cb.checked
+                ? 'rgba(34,197,94,.6)' : 'rgba(91,100,115,.6)';
+            }});
+          }}
           wirePad(card);
         }}
         function stopStream() {{
           tpStreamOn = false;
+          const card = document.querySelector('.card[data-cmd="trackpad"]');
+          if (card && card._streamWs) {{
+            card._streamWs.close();
+            card._streamWs = null;
+          }}
           if (tpImg) tpImg.src = '';
         }}
         function wirePad(card) {{
@@ -2469,8 +2784,8 @@ class Handler(BaseHTTPRequestHandler):
                        '</div>'
                        '<div class="ctrls">'
                        '<label><input type="checkbox" id="tp-stream" checked> Stream</label>'
-                       '<label>Sensitivity <input type="range" id="tp-sens" min="3" '
-                       'max="18" step="0.6" value="9"></label>'
+                       '<label>Sensitivity <input type="range" id="tp-sens" min="4.5" '
+                       'max="27" step="0.9" value="13.5"></label>'
                        '<span class="fps" id="tp-fps">— fps</span>'
                        '</div>'
                        '<div class="out"></div></div>')
