@@ -578,6 +578,17 @@ def _draw_cursor(mdc, scale: int = 2):
     Uses GetCursorInfo (handles hidden cursors and the I-beam etc.) and
     DrawIconEx to blit the icon sprite at the cursor's screen position.
     """
+    _draw_cursor_at(mdc, None, None, scale=scale)
+
+
+def _draw_cursor_at(mdc, x, y, scale: int = 2):
+    """Draw the cursor at (x, y) in DC-local coordinates.
+
+    If x/y are None, the current screen cursor position is used (the DC
+    is assumed to be a full-screen capture). Otherwise the caller supplies
+    the translated position — used by zoom mode where the DC only contains
+    a sub-rect of the screen.
+    """
     class _CURSORINFO(ctypes.Structure):
         _fields_ = [("cbSize", ctypes.c_uint32),
                     ("flags", ctypes.c_uint32),
@@ -594,7 +605,8 @@ def _draw_cursor(mdc, scale: int = 2):
     # flags & 1 == CURSOR_SHOWING; if not, the cursor is hidden.
     if not (ci.flags & 1) or not ci.hCursor:
         return
-    x, y = ci.ptScreenPos[0], ci.ptScreenPos[1]
+    if x is None or y is None:
+        x, y = ci.ptScreenPos[0], ci.ptScreenPos[1]
     # Get the icon's nominal size so we can scale it up.
     class _ICONINFO(ctypes.Structure):
         _fields_ = [("fIcon", wintypes.BOOL), ("xHotspot", wintypes.DWORD),
@@ -853,8 +865,18 @@ class _ScreenStreamer:
         self._prev_cursor = (-1, -1)
         self._buf = None
 
-    def get_frame(self, quality=50, max_w=1280):
-        """Return JPEG bytes if the screen changed, or None if unchanged."""
+    def get_frame(self, quality=50, max_w=1280, zoom=1):
+        """Return JPEG bytes if the screen changed, or None if unchanged.
+
+        When zoom > 1, only a (1/zoom) region centered on the mouse cursor
+        is captured and scaled up to max_w — effectively a magnifier that
+        follows the cursor. This doubles per-pixel detail at the same output
+        width, which keeps text legible without increasing payload size.
+
+        In zoom mode we capture ONLY the crop region directly from the
+        screen DC (not the full screen then crop), which is ~10x less work
+        per frame and keeps latency low even at high zoom.
+        """
         _init_gdi()
         gdi = ctypes.windll.gdiplus
         sw = _user32.GetSystemMetrics(0)
@@ -865,26 +887,36 @@ class _ScreenStreamer:
         pt = wintypes.POINT()
         _user32.GetCursorPos(ctypes.byref(pt))
         cursor_pos = (pt.x, pt.y)
-        # Capture screen + cursor
+        # Compute the capture region. In zoom mode this is a sub-rect of
+        # the screen centered on the cursor; otherwise it's the full screen.
+        if zoom > 1:
+            crop_w = max(1, sw // zoom)
+            crop_h = max(1, sh // zoom)
+            cx, cy = cursor_pos
+            crop_x = max(0, min(cx - crop_w // 2, sw - crop_w))
+            crop_y = max(0, min(cy - crop_h // 2, sh - crop_h))
+        else:
+            crop_x, crop_y, crop_w, crop_h = 0, 0, sw, sh
+        # Capture ONLY the crop region directly from the screen DC.
         hdc = _user32.GetDC(0)
         mdc = _gdi32.CreateCompatibleDC(hdc)
-        hbmp = _gdi32.CreateCompatibleBitmap(hdc, sw, sh)
+        hbmp = _gdi32.CreateCompatibleBitmap(hdc, crop_w, crop_h)
         _gdi32.SelectObject(mdc, hbmp)
-        _gdi32.BitBlt(mdc, 0, 0, sw, sh, hdc, 0, 0, 0x00CC0020)
+        _gdi32.BitBlt(mdc, 0, 0, crop_w, crop_h, hdc, crop_x, crop_y, 0x00CC0020)
         _user32.ReleaseDC(0, hdc)
         # Change detection: sample pixels BEFORE drawing the cursor (the
         # cursor sprite can blink/anti-alias and cause false positives).
         bi = _BITMAPINFOHEADER()
         bi.biSize = ctypes.sizeof(bi)
-        bi.biWidth = sw
-        bi.biHeight = sh
+        bi.biWidth = crop_w
+        bi.biHeight = crop_h
         bi.biPlanes = 1
         bi.biBitCount = 32
         bi.biCompression = 0  # BI_RGB
-        buf_size = sw * sh * 4
+        buf_size = crop_w * crop_h * 4
         if self._buf is None or len(self._buf) < buf_size:
             self._buf = (ctypes.c_ubyte * buf_size)()
-        _gdi32.GetDIBits(mdc, hbmp, 0, sh, self._buf, ctypes.byref(bi), 0)
+        _gdi32.GetDIBits(mdc, hbmp, 0, crop_h, self._buf, ctypes.byref(bi), 0)
         sample = bytes(self._buf[::4096])
         changed = (sample != self._prev_sample or
                    cursor_pos != self._prev_cursor)
@@ -894,23 +926,30 @@ class _ScreenStreamer:
             _gdi32.DeleteObject(hbmp)
             _gdi32.DeleteDC(mdc)
             return None
-        # Draw the cursor only when we're actually sending a frame.
-        _draw_cursor(mdc, scale=2)
-        # Downscale if screen is wider than max_w (0 = no downscale)
-        if max_w > 0 and sw > max_w:
+        # Draw the cursor. In zoom mode the cursor's screen position must
+        # be translated into crop-local coordinates.
+        if zoom > 1:
+            _draw_cursor_at(mdc, cursor_pos[0] - crop_x,
+                            cursor_pos[1] - crop_y, scale=2)
+        else:
+            _draw_cursor(mdc, scale=2)
+        # Downscale the crop to max_w if needed.
+        if max_w > 0 and crop_w > max_w:
             out_w = max_w
-            out_h = int(sh * max_w / sw)
+            out_h = int(crop_h * max_w / crop_w)
             hdc2 = _user32.GetDC(0)
             mdc2 = _gdi32.CreateCompatibleDC(hdc2)
             hbmp2 = _gdi32.CreateCompatibleBitmap(hdc2, out_w, out_h)
             _user32.ReleaseDC(0, hdc2)
             _gdi32.SelectObject(mdc2, hbmp2)
             _gdi32.SetStretchBltMode(mdc2, 3)  # HALFTONE
-            _gdi32.StretchBlt(mdc2, 0, 0, out_w, out_h, mdc, 0, 0, sw, sh,
-                              0x00CC0020)
+            _gdi32.StretchBlt(mdc2, 0, 0, out_w, out_h, mdc,
+                              0, 0, crop_w, crop_h, 0x00CC0020)
             _gdi32.DeleteObject(hbmp)
             _gdi32.DeleteDC(mdc)
             mdc, hbmp, sw, sh = mdc2, hbmp2, out_w, out_h
+        else:
+            sw, sh = crop_w, crop_h
         # Create GDI+ bitmap and encode JPEG in memory
         gdi.GdipCreateBitmapFromHBITMAP.argtypes = [ctypes.c_void_p,
             ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
@@ -1002,9 +1041,27 @@ class _KEYBDINPUT(ctypes.Structure):
                 ("dwExtraInfo", ctypes.c_void_p)]
 
 
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
+                ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.c_void_p)]
+
+
+class _HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [("uMsg", wintypes.DWORD), ("wParamL", wintypes.WORD),
+                ("wParamH", wintypes.WORD)]
+
+
 class _INPUT(ctypes.Structure):
+    # The INPUT union is sized by its largest member (MOUSEINPUT on x64).
+    # Declaring only KEYBDINPUT makes sizeof(_INPUT) wrong (32 vs 40 bytes),
+    # which causes SendInput to reject every call — so no keystrokes or
+    # shortcuts (win+d, alt+tab, typing) ever reach the focused window.
     class _INPUT_UNION(ctypes.Union):
-        _fields_ = [("ki", _KEYBDINPUT)]
+        _fields_ = [("ki", _KEYBDINPUT),
+                    ("mi", _MOUSEINPUT),
+                    ("hi", _HARDWAREINPUT)]
     _anonymous_ = ("u",)
     _fields_ = [("type", wintypes.DWORD), ("u", _INPUT_UNION)]
 
@@ -1772,34 +1829,48 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         quality = [int(query.get("q", [50])[0])]
         max_w = [int(query.get("w", [1024])[0])]
+        zoom = [int(query.get("z", [1])[0])]
         paused = [False]
         streamer = _ScreenStreamer()
         stop = threading.Event()
 
         def capture_loop():
-            # Adaptive polling: when the screen is static, back off to
-            # checking once per second (near-zero CPU). When changes are
-            # detected, poll at full speed (~30fps). This keeps idle CPU
-            # near 0 instead of burning ~30 captures/sec for nothing.
-            idle_interval = 1.0    # when nothing changes
-            active_interval = 0.033  # ~30fps when screen is active
-            interval = idle_interval
+            # Poll at max speed — no artificial 30fps cap. The loop runs
+            # as fast as it can capture+encode+send, which on a modern PC
+            # is well above 60fps and lets the phone render at its own
+            # refresh rate. Only back off gently when the screen has been
+            # completely static for a while, to avoid burning CPU for
+            # nothing. Zoom mode never idles (cursor moves constantly).
+            idle_interval = 0.2    # gentle backoff when truly static
+            active_interval = 0.0  # full speed — no cap
+            interval = active_interval
+            static_streak = 0
             while not stop.is_set():
                 if paused[0]:
                     time.sleep(0.1)
                     continue
-                frame = streamer.get_frame(quality[0], max_w[0])
+                frame = streamer.get_frame(quality[0], max_w[0], zoom[0])
                 if frame is not None:
                     try:
                         self._ws_write_frame(self.wfile, frame, opcode=0x2)
                     except (OSError, ValueError):
                         stop.set()
                         break
-                    interval = active_interval  # screen active — poll fast
+                    interval = active_interval  # screen active — full speed
+                    static_streak = 0
                 else:
-                    # Screen unchanged — back off toward idle.
-                    interval = min(interval * 1.5, idle_interval)
-                time.sleep(interval)
+                    # Screen unchanged — keep polling at full speed for a
+                    # short streak, then back off gently to idle_interval.
+                    static_streak += 1
+                    if static_streak > 30:
+                        interval = idle_interval
+                    # else keep polling at full speed
+                if interval > 0:
+                    time.sleep(interval)
+                else:
+                    # Yield to let other threads run without actually
+                    # sleeping — keeps latency at a minimum.
+                    time.sleep(0)
 
         cap = threading.Thread(target=capture_loop, daemon=True)
         cap.start()
@@ -1821,6 +1892,8 @@ class Handler(BaseHTTPRequestHandler):
                                 quality[0] = int(msg["q"])
                             if "w" in msg:
                                 max_w[0] = int(msg["w"])
+                            if "z" in msg:
+                                zoom[0] = max(1, int(msg["z"]))
                     except Exception:
                         pass
         except (OSError, ValueError, _struct.error):
@@ -2397,7 +2470,7 @@ class Handler(BaseHTTPRequestHandler):
           let lastUrl = null;
           const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
           const sw = new WebSocket(proto + '//' + location.host + '/vstream?token='
-            + encodeURIComponent(TOKEN) + '&q=75&w=0');
+            + encodeURIComponent(TOKEN) + '&q=75&w=1280');
           sw.binaryType = 'arraybuffer';
           card._streamWs = sw;
           sw.onopen = () => {{
@@ -2426,6 +2499,23 @@ class Handler(BaseHTTPRequestHandler):
               tpFpsN = 0; tpFpsT = now;
             }}
           }};
+          // Double-tap the preview to toggle 2x zoom (cursor-following crop).
+          // In zoom mode the server crops a half-screen region around the
+          // mouse and scales it to the same output width, so each pixel is
+          // twice as detailed — much sharper text without bigger payloads.
+          let lastTap = 0, zoomed = false;
+          tpImg.addEventListener('touchend', e => {{
+            const now = performance.now();
+            if (now - lastTap < 300) {{
+              e.preventDefault();
+              zoomed = !zoomed;
+              if (sw.readyState === 1)
+                sw.send(JSON.stringify({{m:'set', z: zoomed ? 3 : 1}}));
+              tpImg.style.outline = zoomed ? '3px solid #22c55e' : '';
+              badge.textContent = zoomed ? '3x' : 'live';
+            }}
+            lastTap = now;
+          }}, {{passive:false}});
           // Wire up the stream checkbox (pause/resume via control message)
           const cb = card.querySelector('#tp-stream');
           if (cb && !cb.dataset.streamWired) {{
