@@ -927,10 +927,13 @@ class _ScreenStreamer:
             _gdi32.DeleteDC(mdc)
             return None
         # Draw the cursor. In zoom mode the cursor's screen position must
-        # be translated into crop-local coordinates.
+        # be translated into crop-local coordinates. The crop is already
+        # magnified (a small region stretched up to max_w), so drawing the
+        # cursor at scale=2 like the full-screen path makes it enormous —
+        # use scale=1 here so it stays proportional after the stretch.
         if zoom > 1:
             _draw_cursor_at(mdc, cursor_pos[0] - crop_x,
-                            cursor_pos[1] - crop_y, scale=2)
+                            cursor_pos[1] - crop_y, scale=1)
         else:
             _draw_cursor(mdc, scale=2)
         # Downscale the crop to max_w if needed.
@@ -2209,6 +2212,31 @@ class Handler(BaseHTTPRequestHandler):
           el.style.height = 'auto';
           el.style.height = el.scrollHeight + 'px';
         }}
+        // Write text to the *client* (phone) clipboard so the user can paste
+        // it into any app on their device. Tries the async Clipboard API first
+        // (works in secure contexts / recent browsers), then falls back to a
+        // hidden textarea + execCommand for older browsers / plain http.
+        async function copyToClientClipboard(text) {{
+          if (!text) return false;
+          try {{
+            if (navigator.clipboard && window.isSecureContext) {{
+              await navigator.clipboard.writeText(text);
+              return true;
+            }}
+          }} catch (e) {{}}
+          try {{
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.top = '-9999px';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.focus(); ta.select();
+            const ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            return ok;
+          }} catch (e) {{ return false; }}
+        }}
         // Render a response into the card's output area.
         function renderResult(card, data, ok) {{
           const out = card.querySelector('.out');
@@ -2218,7 +2246,14 @@ class Handler(BaseHTTPRequestHandler):
             img.src = 'data:image/png;base64,' + data.result.image;
             out.appendChild(img);
           }} else if (data && data.result && 'text' in data.result) {{
-            out.textContent = data.result.text || '(empty clipboard)';
+            const text = data.result.text || '';
+            out.textContent = text || '(empty clipboard)';
+            // If this is the "copy" command, mirror the PC clipboard onto
+            // the client clipboard so the user can paste it anywhere on
+            // their device.
+            if (card.dataset.cmd === 'copy' && text) {{
+              copyToClientClipboard(text);
+            }}
           }} else if (data && data.result && data.result.ansi) {{
             // ANSI-colored console output (ps/wsl). Render to colored HTML.
             out.innerHTML = ansiToHtml(data.result.stdout || '',
@@ -2684,6 +2719,42 @@ class Handler(BaseHTTPRequestHandler):
                body: JSON.stringify({{combo: combo}})}});
           }} catch (e) {{}}
         }}
+        // Single "Copy" button: sends Ctrl+C to the PC (copies the current
+        // selection into the PC clipboard), waits briefly for it to land, then
+        // pulls the PC clipboard onto this device so it can be pasted into any
+        // local app. Shows a transient toast on the preview badge instead of a
+        // blocking alert() popup.
+        let _tpToastT = null;
+        function tpToast(card, msg, ms) {{
+          const badge = card.querySelector('.badge');
+          if (!badge) return;
+          badge.textContent = msg;
+          badge.style.display = 'block';
+          if (_tpToastT) clearTimeout(_tpToastT);
+          _tpToastT = setTimeout(() => {{ badge.style.display = ''; _tpToastT = null; }}, ms || 1500);
+        }}
+        async function tpCopyToClient() {{
+          const card = document.querySelector('.card[data-cmd="trackpad"]');
+          if (!card) return;
+          tpToast(card, 'copying…', 1500);
+          try {{
+            // 1. Send Ctrl+C to the PC so the current selection is copied.
+            await fetch('/keys?token=' + encodeURIComponent(TOKEN),
+              {{method:'POST', headers:{{'Content-Type':'application/json'}},
+               body: JSON.stringify({{combo: 'ctrl+c'}})}});
+            // 2. Give the PC a moment to update its clipboard.
+            await new Promise(r => setTimeout(r, 120));
+            // 3. Pull the PC clipboard onto this device.
+            const res = await fetch('/copy?token=' + encodeURIComponent(TOKEN),
+              {{method:'POST', headers:{{'Content-Type':'application/json'}},
+               body: JSON.stringify({{}})}});
+            const data = await res.json();
+            const text = (data && data.result && data.result.text) || '';
+            if (!text) {{ tpToast(card, 'PC clipboard empty'); return; }}
+            const ok = await copyToClientClipboard(text);
+            tpToast(card, ok ? ('copied ' + text.length + ' chars') : 'copy failed on device');
+          }} catch (e) {{ tpToast(card, 'copy failed'); }}
+        }}
         // Wire up the keyboard input: Enter types the text, then sends Enter.
         (function() {{
           const inp = document.getElementById('tp-kb');
@@ -2865,7 +2936,7 @@ class Handler(BaseHTTPRequestHandler):
                        '</div>'
                        '<div class="kb-shortcuts">'
                        '<button onclick="tpSendKeys(\'enter\')">⏎</button>'
-                       '<button onclick="tpSendKeys(\'ctrl+c\')">Copy</button>'
+                       '<button onclick="tpCopyToClient()">Copy</button>'
                        '<button onclick="tpSendKeys(\'ctrl+v\')">Paste</button>'
                        '<button onclick="tpSendKeys(\'ctrl+x\')">Cut</button>'
                        '<button onclick="tpSendKeys(\'ctrl+z\')">Undo</button>'
