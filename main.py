@@ -774,8 +774,12 @@ class Handler(BaseHTTPRequestHandler):
         .field input:not([type=checkbox]){{background:#0f1115;border:1px solid #2a2f3a;
         color:#e6e6e6;border-radius:6px;padding:.35rem .5rem;font-size:.85rem;width:5.5rem}}
         .text-field{{flex:1 1 100%;flex-wrap:wrap}}
-        .text-field input{{flex:1 1 100%;width:100%;min-height:2.4rem;resize:vertical;
-        font-family:inherit;line-height:1.4}}
+        .text-field input,.text-field textarea{{flex:1 1 100%;width:100%;
+        min-height:2.4rem;font-family:inherit;line-height:1.4}}
+        .text-field textarea{{background:#0f1115;border:1px solid #2a2f3a;
+        color:#e6e6e6;border-radius:6px;padding:.35rem .5rem;font-size:.85rem;
+        overflow:auto;white-space:pre-wrap;resize:vertical;
+        max-height:60vh}}
         .bool-field{{gap:.5rem}}
         .out{{padding:.5rem .6rem;border-radius:6px;background:#0f1115;
         border:1px solid #2a2f3a;font-family:ui-monospace,monospace;
@@ -853,13 +857,20 @@ class Handler(BaseHTTPRequestHandler):
         }}
         // Read the current input values of a card into a body object.
         function readInputs(card) {{
-          const inputs = card.querySelectorAll('.details input');
+          const inputs = card.querySelectorAll('.details input, .details textarea');
           const body = {{}};
           inputs.forEach(i => {{
             if (i.type === 'checkbox') {{ body[i.name] = i.checked; }}
             else if (i.value !== '') {{ body[i.name] = i.value; }}
           }});
           return body;
+        }}
+        // Auto-grow a textarea to fit its content (up to its CSS max-height,
+        // after which it scrolls). Called on input and after programmatic
+        // changes so multi-line paste text expands instead of staying 1 row.
+        function autoGrow(el) {{
+          el.style.height = 'auto';
+          el.style.height = el.scrollHeight + 'px';
         }}
         // Render a response into the card's output area.
         function renderResult(card, data, ok) {{
@@ -927,7 +938,7 @@ class Handler(BaseHTTPRequestHandler):
         }}
         function wireLive(card, cmd) {{
           if (card.dataset.live !== 'true') return;
-          const inputs = card.querySelectorAll('.details input');
+          const inputs = card.querySelectorAll('.details input, .details textarea');
           inputs.forEach(i => {{
             i.addEventListener('input', () => {{
               card.querySelector('.details').classList.add('open');
@@ -976,6 +987,11 @@ class Handler(BaseHTTPRequestHandler):
         document.querySelectorAll('.card[data-live="true"]').forEach(card => {{
           wireLive(card, card.dataset.cmd);
         }});
+        // Auto-grow textareas on input and size them once on load.
+        document.querySelectorAll('textarea').forEach(t => {{
+          autoGrow(t);
+          t.addEventListener('input', () => autoGrow(t));
+        }});
         </script></body></html>"""
         body = html.encode("utf-8")
         self.send_response(200)
@@ -1004,6 +1020,11 @@ class Handler(BaseHTTPRequestHandler):
             itype = "number" if p["type"] in ("int", "float") else "text"
             ph = p["default"] if p["has_default"] else ""
             cls = "field text-field" if p["type"] == "str" else "field"
+            if p["type"] == "str":
+                # Use a <textarea> so multi-line input (e.g. paste) works.
+                return (f'<label class="{cls}">{nm}'
+                        f'<textarea name="{nm}" placeholder="{ph}" '
+                        f'rows="1"></textarea></label>')
             return (f'<label class="{cls}">{nm}'
                     f'<input name="{nm}" type="{itype}" placeholder="{ph}"></label>')
         fields = "".join(_field(p) for p in params)
