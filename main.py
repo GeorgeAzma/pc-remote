@@ -530,6 +530,166 @@ def screenshot():
     return {"image": _capture_screen_b64()}
 
 
+# --- Fast dependency-free screen capture (GDI+ via ctypes) ---
+# PowerShell-based capture is ~300-500ms per frame (process spawn + .NET).
+# This GDI+ path runs in-process and captures + JPEG-encodes in ~30-60ms,
+# which is fast enough for a ~15fps trackpad preview without any deps.
+_gdi_initialized = False
+_gdi_lock = threading.Lock()
+
+
+def _init_gdi():
+    global _gdi_initialized
+    if _gdi_initialized:
+        return
+    with _gdi_lock:
+        if _gdi_initialized:
+            return
+        gdi = ctypes.windll.gdiplus
+        # GdiplusStartup
+        class _StartupInput(ctypes.Structure):
+            _fields_ = [("GdiplusVersion", ctypes.c_uint32),
+                        ("DebugEventCallback", ctypes.c_void_p),
+                        ("SuppressBackgroundThread", ctypes.c_int),
+                        ("SuppressExternalCodecs", ctypes.c_int)]
+        si = _StartupInput()
+        si.GdiplusVersion = 1
+        token = ctypes.c_ulong(0)
+        gdi.GdiplusStartup.argtypes = [ctypes.POINTER(ctypes.c_ulong),
+                                       ctypes.c_void_p, ctypes.c_void_p]
+        gdi.GdiplusStartup(ctypes.byref(token), ctypes.byref(si), None)
+        _gdi_initialized = True
+
+
+def _capture_screen_jpeg(quality: int = 55, max_w: int = 1280) -> bytes:
+    """Capture the primary screen as a JPEG byte string (fast, in-process)."""
+    _init_gdi()
+    user32 = ctypes.windll.user32
+    gdi32 = ctypes.windll.gdi32
+    gdi = ctypes.windll.gdiplus
+    sw = user32.GetSystemMetrics(0)
+    sh = user32.GetSystemMetrics(1)
+    if sw <= 0 or sh <= 0:
+        return b""
+    hdc = user32.GetDC(0)
+    mdc = gdi32.CreateCompatibleDC(hdc)
+    hbmp = gdi32.CreateCompatibleBitmap(hdc, sw, sh)
+    gdi32.SelectObject(mdc, hbmp)
+    gdi32.BitBlt(mdc, 0, 0, sw, sh, hdc, 0, 0, 0x00CC0020)  # SRCCOPY
+    user32.ReleaseDC(0, hdc)
+    # GDI+ Bitmap from HBITMAP.
+    gdi.GdipCreateBitmapFromHBITMAP.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                                ctypes.POINTER(ctypes.c_void_p)]
+    gdi.GdipCreateBitmapFromHBITMAP.restype = ctypes.c_int
+    bmp = ctypes.c_void_p(0)
+    status = gdi.GdipCreateBitmapFromHBITMAP(hbmp, None, ctypes.byref(bmp))
+    gdi32.DeleteObject(hbmp)
+    gdi32.DeleteDC(mdc)
+    if status != 0 or not bmp.value:
+        return b""
+    # JPEG encoder CLSID: {557CF401-1A04-11D3-9A73-0000F81EF32E}
+    class _GUID(ctypes.Structure):
+        _fields_ = [("Data1", ctypes.c_uint32), ("Data2", ctypes.c_uint16),
+                    ("Data3", ctypes.c_uint16),
+                    ("Data4", ctypes.c_ubyte * 8)]
+    enc = _GUID(0x557CF401, 0x1A04, 0x11D3,
+                (ctypes.c_ubyte * 8)(0x9A, 0x73, 0x00, 0x00, 0xF8, 0x1E, 0xF3, 0x2E))
+    # EncoderParameters with one Quality parameter.
+    class _EncoderParameter(ctypes.Structure):
+        _fields_ = [("Guid", _GUID), ("NumberOfValues", ctypes.c_uint32),
+                    ("Type", ctypes.c_uint32), ("Value", ctypes.c_void_p)]
+    class _EncoderParameters(ctypes.Structure):
+        _fields_ = [("Count", ctypes.c_uint32), ("Parameter", _EncoderParameter)]
+    params = _EncoderParameters()
+    params.Count = 1
+    # Quality encoder parameter GUID: {1D5BE4B5-FA4A-4520-9B3C-181A0E770A07}
+    params.Parameter.Guid = _GUID(0x1D5BE4B5, 0xFA4A, 0x4520,
+                                  (ctypes.c_ubyte * 8)(0x9B, 0x3C, 0x18, 0x1A,
+                                                       0x0E, 0x77, 0x0A, 0x07))
+    params.Parameter.NumberOfValues = 1
+    params.Parameter.Type = 1  # EncoderParameterValueTypeLong
+    q = ctypes.c_uint32(max(1, min(100, int(quality))))
+    params.Parameter.Value = ctypes.cast(ctypes.pointer(q), ctypes.c_void_p)
+    # Save to a temp file (robust; avoids fragile IStream vtable reads).
+    import tempfile
+    tmp = tempfile.mktemp(suffix=".jpg")
+    wpath = tmp.replace("\\", "\\\\")
+    gdi.GdipSaveImageToFile.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p,
+                                        ctypes.c_void_p, ctypes.c_void_p]
+    gdi.GdipSaveImageToFile.restype = ctypes.c_int
+    status = gdi.GdipSaveImageToFile(bmp, tmp, ctypes.byref(enc), ctypes.byref(params))
+    gdi.GdipDisposeImage.argtypes = [ctypes.c_void_p]
+    gdi.GdipDisposeImage(bmp)
+    if status != 0:
+        return b""
+    try:
+        with open(tmp, "rb") as f:
+            data = f.read()
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    return data
+
+
+# --- Mouse control (for the trackpad) ---
+# Absolute positioning uses the normalized 0..65535 coordinate space that
+# mouse_event expects; we map relative trackpad deltas to that space.
+MOUSEEVENTF_MOVE = 0x0001
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
+MOUSEEVENTF_ABSOLUTE = 0x8000
+
+
+def _mouse_move_relative(dx: int, dy: int):
+    """Move the cursor by (dx, dy) pixels relative to its current position."""
+    ctypes.windll.user32.mouse_event(MOUSEEVENTF_MOVE, int(dx), int(dy), 0, 0)
+
+
+def _mouse_click(button: str = "left"):
+    if button == "right":
+        ctypes.windll.user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+        ctypes.windll.user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+    else:
+        ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+
+
+def _mouse_button_down(button: str = "left"):
+    flag = MOUSEEVENTF_RIGHTDOWN if button == "right" else MOUSEEVENTF_LEFTDOWN
+    ctypes.windll.user32.mouse_event(flag, 0, 0, 0, 0)
+
+
+def _mouse_button_up(button: str = "left"):
+    flag = MOUSEEVENTF_RIGHTUP if button == "right" else MOUSEEVENTF_LEFTUP
+    ctypes.windll.user32.mouse_event(flag, 0, 0, 0, 0)
+
+
+@command("mousemove", "Move the mouse cursor by a relative delta (dx, dy).", hide=True)
+def mousemove(dx: int = 0, dy: int = 0):
+    _mouse_move_relative(dx, dy)
+    return {"status": "moved", "dx": dx, "dy": dy}
+
+
+@command("mouseclick", "Click the mouse (left/right).", hide=True)
+def mouseclick(button: str = "left"):
+    _mouse_click(button)
+    return {"status": "clicked", "button": button}
+
+
+@command("mousedrag", "Begin or end a drag (hold/release a mouse button).", hide=True)
+def mousedrag(action: str = "down", button: str = "left"):
+    """action = 'down' to press and hold, 'up' to release."""
+    if action == "up":
+        _mouse_button_up(button)
+    else:
+        _mouse_button_down(button)
+    return {"status": "drag_" + action, "button": button}
+
+
 @command("copy", "Read the PC clipboard and return its text.", tab="tools")
 def copy():
     out = subprocess.run([POWERSHELL, "-NoProfile", "-Command", "Get-Clipboard"],
@@ -551,6 +711,62 @@ def paste(text: str = ""):
     finally:
         os.remove(path)
     return {"status": "copied", "length": len(text)}
+
+
+@command("ps", "Run a PowerShell command on the PC and return its output.", tab="tools")
+def ps(command: str = ""):
+    if not command.strip():
+        return {"error": "no command"}
+    try:
+        out = subprocess.run([POWERSHELL, "-NoProfile", "-Command", command],
+                             capture_output=True, text=True, timeout=60,
+                             **_SUBPROC_KWARGS)
+        return {"stdout": out.stdout, "stderr": out.stderr, "exit": out.returncode}
+    except subprocess.TimeoutExpired:
+        return {"error": "timeout", "detail": "command exceeded 60s"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@command("wsl", "Run a shell command in WSL (default distro) and return output.", tab="tools")
+def wsl(command: str = ""):
+    if not command.strip():
+        return {"error": "no command"}
+    try:
+        out = subprocess.run(["wsl", "--", "bash", "-lc", command],
+                             capture_output=True, text=True, timeout=60,
+                             **_SUBPROC_KWARGS)
+        return {"stdout": out.stdout, "stderr": out.stderr, "exit": out.returncode}
+    except FileNotFoundError:
+        return {"error": "wsl not installed"}
+    except subprocess.TimeoutExpired:
+        return {"error": "timeout", "detail": "command exceeded 60s"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@command("sendlink", "Open a URL in the PC's default browser.", tab="tools")
+def sendlink(url: str = ""):
+    import webbrowser
+    u = url.strip()
+    if not u:
+        return {"error": "no url"}
+    if not u.startswith(("http://", "https://")):
+        u = "https://" + u
+    webbrowser.open(u)
+    return {"status": "opened", "url": u}
+
+
+@command("sendfile", "Upload a file from your phone to the PC's Downloads folder.", tab="tools")
+def sendfile():
+    # The actual upload is handled by the /upload endpoint (multipart POST).
+    # This command exists only to render a card with a file picker in the UI.
+    return {"status": "ready", "hint": "pick a file below"}
+
+
+@command("trackpad", "Turn this page into a remote trackpad with a live screen preview.", primary=True)
+def trackpad():
+    return {"status": "ready"}
 
 
 @command("brightness", "Set monitor brightness (0-100).", range=["level"], tab="media", live=True)
@@ -712,14 +928,105 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authorized(query):
                 return
             return self._send(200, list_commands())
+        if route == "/stream":
+            return self._serve_stream(query)
         return self._run(route.lstrip("/"), query)
 
     def do_POST(self):
         _record_request()
         route, query = self._parse()
+        if route == "/upload":
+            return self._handle_upload(query)
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = json.loads(self.rfile.read(length) or b"{}") if length else {}
         return self._run(route.lstrip("/"), query, body)
+
+    def _serve_stream(self, query: dict):
+        """Single-frame screen capture as JPEG. The trackpad polls this."""
+        if not self._authorized(query):
+            return
+        q = int(query.get("q", [55])[0])
+        mw = int(query.get("w", [1280])[0])
+        data = _capture_screen_jpeg(quality=q, max_w=mw)
+        if not data:
+            self._send(500, {"error": "capture failed"})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _handle_upload(self, query: dict):
+        """Receive a file upload (multipart/form-data) into the Downloads folder."""
+        if not self._authorized(query):
+            return
+        ctype = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in ctype:
+            self._send(400, {"error": "expected multipart/form-data"})
+            return
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length == 0:
+            self._send(400, {"error": "empty body"})
+            return
+        # Parse the boundary from the Content-Type header.
+        boundary = None
+        for part in ctype.split(";"):
+            part = part.strip()
+            if part.startswith("boundary="):
+                boundary = part[len("boundary="):].strip('"')
+                break
+        if not boundary:
+            self._send(400, {"error": "no boundary"})
+            return
+        raw = self.rfile.read(length)
+        # Split into parts and find the first file part.
+        delim = b"--" + boundary.encode()
+        downloads = os.path.join(os.path.expanduser("~"), "Downloads")
+        os.makedirs(downloads, exist_ok=True)
+        saved = []
+        for chunk in raw.split(delim):
+            if not chunk or chunk == b"--" or chunk == b"--\r\n":
+                continue
+            # Each part: \r\n<headers>\r\n\r\n<body>\r\n
+            if b"\r\n\r\n" not in chunk:
+                continue
+            header_blob, _, body = chunk.partition(b"\r\n\r\n")
+            header_text = header_blob.decode("utf-8", "replace")
+            if 'filename="' not in header_text:
+                continue  # skip non-file fields
+            # Extract filename.
+            fname = None
+            for line in header_text.split("\r\n"):
+                if 'filename="' in line:
+                    i = line.index('filename="') + len('filename="')
+                    j = line.index('"', i)
+                    fname = line[i:j]
+                    break
+            if not fname:
+                continue
+            # Strip trailing \r\n added by multipart.
+            if body.endswith(b"\r\n"):
+                body = body[:-2]
+            # Sanitize the filename.
+            safe = os.path.basename(fname)
+            if not safe:
+                safe = "upload"
+            dest = os.path.join(downloads, safe)
+            # Avoid clobbering existing files.
+            base, ext = os.path.splitext(dest)
+            n = 1
+            while os.path.exists(dest):
+                dest = f"{base} ({n}){ext}"
+                n += 1
+            with open(dest, "wb") as f:
+                f.write(body)
+            saved.append(os.path.basename(dest))
+        if not saved:
+            self._send(400, {"error": "no file part found"})
+            return
+        self._send(200, {"status": "saved", "files": saved, "folder": downloads})
 
     def _serve_index(self, query: dict):
         if not self._authorized(query):
@@ -833,6 +1140,37 @@ class Handler(BaseHTTPRequestHandler):
         transition:transform .2s,background .2s}}
         .switch input:checked + .track{{background:#4da3ff}}
         .switch input:checked + .track:before{{transform:translateX(20px);background:#fff}}
+        /* Send File card */
+        .file-field{{flex:1 1 100%;display:flex;flex-direction:column;gap:.4rem}}
+        .file-field input[type=file]{{color:#9aa4b2;font-size:.85rem}}
+        /* Trackpad card */
+        .trackpad{{display:none;flex-direction:column;gap:.5rem;padding:.6rem}}
+        .trackpad.open{{display:flex}}
+        .trackpad .preview{{position:relative;width:100%;background:#000;
+        border:1px solid #2a2f3a;border-radius:8px;overflow:hidden;
+        aspect-ratio:16/9}}
+        .trackpad .preview img{{width:100%;height:100%;object-fit:contain;
+        display:block}}
+        .trackpad .preview .badge{{position:absolute;top:6px;left:8px;
+        font-size:.7rem;color:#9aa4b2;background:rgba(0,0,0,.5);padding:1px 6px;
+        border-radius:4px}}
+        .trackpad .pad{{flex:1 1 auto;min-height:180px;background:#0f1115;
+        border:1px solid #2a2f3a;border-radius:10px;touch-action:none;
+        user-select:none;-webkit-user-select:none;position:relative;
+        display:flex;align-items:center;justify-content:center;color:#5b6473;
+        font-size:.85rem}}
+        .trackpad .pad.hint::before{{content:"drag to move · tap = click · "
+        "double-tap = right click · double-tap+hold+drag = drag"}}
+        .trackpad .btns{{display:flex;gap:.5rem}}
+        .trackpad .btns button{{flex:1;background:#171a21;border:1px solid #2a2f3a;
+        color:#e6e6e6;padding:.6rem;border-radius:8px;font-weight:600;
+        cursor:pointer;font-size:.85rem}}
+        .trackpad .btns button:active{{background:#222732}}
+        .trackpad .ctrls{{display:flex;align-items:center;gap:.6rem;font-size:.8rem;
+        color:#9aa4b2;flex-wrap:wrap}}
+        .trackpad .ctrls label{{display:flex;align-items:center;gap:.3rem}}
+        .trackpad .ctrls input[type=range]{{width:120px}}
+        .trackpad .ctrls .fps{{margin-left:auto;font-variant-numeric:tabular-nums}}
         </style></head>
         <body><h1>PC Remote Control</h1>{cards}
         <script>
@@ -992,6 +1330,139 @@ class Handler(BaseHTTPRequestHandler):
           autoGrow(t);
           t.addEventListener('input', () => autoGrow(t));
         }});
+
+        // --- Send File: upload to /upload (multipart) ---
+        async function uploadFile(card) {{
+          const inp = card.querySelector('input[type=file]');
+          const out = card.querySelector('.out');
+          if (!inp.files.length) {{
+            out.textContent = 'pick a file first'; out.className = 'out show err';
+            return;
+          }}
+          const fd = new FormData();
+          for (const f of inp.files) fd.append('file', f, f.name);
+          out.textContent = 'uploading…'; out.className = 'out show';
+          try {{
+            const res = await fetch('/upload?token=' + encodeURIComponent(TOKEN),
+              {{method:'POST', body: fd}});
+            const data = await res.json();
+            out.textContent = JSON.stringify(data, null, 2);
+            out.className = 'out show' + (res.ok ? '' : ' err');
+            if (res.ok) inp.value = '';
+          }} catch (e) {{
+            out.textContent = String(e); out.className = 'out show err';
+          }}
+        }}
+
+        // --- Trackpad: live screen stream + touch gestures ---
+        let tpStreamOn = false, tpImg = null, tpLast = null, tpFpsT = 0, tpFpsN = 0;
+        let tpDragPending = false, tpDragging = false, tpDownAt = 0, tpMoved = false;
+        function toggleTrackpad(card) {{
+          const tp = card.querySelector('.trackpad');
+          const open = tp.classList.toggle('open');
+          if (open) startStream(card); else stopStream();
+        }}
+        function startStream(card) {{
+          tpStreamOn = true; tpImg = card.querySelector('.preview img');
+          const badge = card.querySelector('.badge');
+          const fpsEl = card.getElementById('tp-fps');
+          tpFpsT = performance.now(); tpFpsN = 0;
+          const loop = async () => {{
+            if (!tpStreamOn) return;
+            const cb = document.querySelector('.card[data-cmd="trackpad"]');
+            if (!cb || !cb.querySelector('.trackpad.open')) {{ tpStreamOn = false; return; }}
+            if (document.getElementById('tp-stream').checked) {{
+              try {{
+                const r = await fetch('/stream?token=' + encodeURIComponent(TOKEN)
+                  + '&q=50&w=1024', {{cache:'no-store'}});
+                if (r.ok) {{
+                  const blob = await r.blob();
+                  tpImg.src = URL.createObjectURL(blob);
+                  tpFpsN++;
+                  const now = performance.now();
+                  if (now - tpFpsT > 1000) {{
+                    fpsEl.textContent = tpFpsN + ' fps';
+                    tpFpsN = 0; tpFpsT = now;
+                  }}
+                }}
+              }} catch (e) {{}}
+            }}
+            if (tpStreamOn) requestAnimationFrame(loop);
+          }};
+          loop();
+          wirePad(card);
+        }}
+        function stopStream() {{
+          tpStreamOn = false;
+          if (tpImg) tpImg.src = '';
+        }}
+        function wirePad(card) {{
+          const pad = card.querySelector('.pad');
+          if (pad.dataset.wired) return;
+          pad.dataset.wired = '1';
+          const sens = () => parseFloat(document.getElementById('tp-sens').value);
+          pad.addEventListener('touchstart', e => {{
+            if (e.touches.length !== 1) return;
+            e.preventDefault();
+            const t = e.touches[0];
+            tpLast = {{x:t.clientX, y:t.clientY}};
+            tpDownAt = performance.now(); tpMoved = false;
+            tpDragPending = false; tpDragging = false;
+          }}, {{passive:false}});
+          pad.addEventListener('touchmove', e => {{
+            if (e.touches.length !== 1 || !tpLast) return;
+            e.preventDefault();
+            const t = e.touches[0];
+            const dx = (t.clientX - tpLast.x) * sens();
+            const dy = (t.clientY - tpLast.y) * sens();
+            if (Math.abs(t.clientX - tpLast.x) > 4 || Math.abs(t.clientY - tpLast.y) > 4)
+              tpMoved = true;
+            if (tpDragPending) {{
+              // double-tap+hold drag: press button on first move, then move.
+              mouseCmd('mousedrag', {{action:'down'}});
+              tpDragPending = false; tpDragging = true;
+            }}
+            mouseCmd('mousemove', {{dx:Math.round(dx), dy:Math.round(dy)}});
+            tpLast = {{x:t.clientX, y:t.clientY}};
+          }}, {{passive:false}});
+          pad.addEventListener('touchend', e => {{
+            if (!tpLast) return;
+            const dt = performance.now() - tpDownAt;
+            if (tpDragging) {{
+              mouseCmd('mousedrag', {{action:'up'}});
+            }} else if (!tpMoved && dt < 250) {{
+              // tap = left click
+              mouseCmd('mouseclick', {{button:'left'}});
+            }}
+            tpLast = null; tpDragging = false; tpDragPending = false;
+          }});
+          // Double-tap detection: a second tap within 300ms of the first.
+          let lastTap = 0;
+          pad.addEventListener('touchend', () => {{
+            const now = performance.now();
+            if (now - lastTap < 300) {{
+              // double tap: if finger stays down next, begin drag; else right click.
+              // We can't know yet, so arm drag-pending; if no move comes, treat as
+              // right click on the next touchend.
+              tpDragPending = true;
+              setTimeout(() => {{
+                if (tpDragPending) {{  // no drag started -> right click
+                  mouseCmd('mouseclick', {{button:'right'}});
+                  tpDragPending = false;
+                }}
+              }}, 250);
+            }}
+            lastTap = now;
+          }});
+        }}
+        async function mouseCmd(cmd, body) {{
+          try {{
+            await fetch('/' + cmd + '?token=' + encodeURIComponent(TOKEN),
+              {{method:'POST', headers:{{'Content-Type':'application/json'}},
+               body: JSON.stringify(body)}});
+          }} catch (e) {{}}
+        }}
+        function mouseBtn(b) {{ mouseCmd('mouseclick', {{button:b}}); }}
         </script></body></html>"""
         body = html.encode("utf-8")
         self.send_response(200)
@@ -1042,6 +1513,34 @@ class Handler(BaseHTTPRequestHandler):
                     f'this.closest(\'.card\'), \'{name}\')">Cancel</button></div>'
                     ) if meta.get("undo") else ""
         ping_flag = '<span class="ping-flag" style="display:none"></span>' if meta.get("ping") else ""
+        # Special-case cards that need custom UI instead of the generic form.
+        if name == "sendfile":
+            details = ('<div class="details"><div class="file-field">'
+                       '<input type="file" name="file" multiple '
+                       'onchange="uploadFile(this.closest(\'.card\'))">'
+                       '<div class="out"></div></div></div>')
+            chev = ""
+            return (f'<div class="card" data-cmd="{name}" data-live="false">'
+                    f'<div class="row" onclick="toggleDetails(this.closest(\'.card\'))">'
+                    f'<span class="name">{name}</span></div>{details}</div>')
+        if name == "trackpad":
+            details = ('<div class="trackpad">'
+                       '<div class="preview"><img alt="screen"><span class="badge">'
+                       'connecting…</span></div>'
+                       '<div class="pad hint"></div>'
+                       '<div class="btns"><button onclick="mouseBtn(\'left\')">Left Click</button>'
+                       '<button onclick="mouseBtn(\'right\')">Right Click</button></div>'
+                       '<div class="ctrls">'
+                       '<label><input type="checkbox" id="tp-stream" checked> Stream</label>'
+                       '<label>Sensitivity <input type="range" id="tp-sens" min="0.5" '
+                       'max="3" step="0.1" value="1.5"></label>'
+                       '<span class="fps" id="tp-fps">— fps</span>'
+                       '</div>'
+                       '<div class="out"></div></div>')
+            chev = ""
+            return (f'<div class="card" data-cmd="{name}" data-live="false">'
+                    f'<div class="row" onclick="toggleTrackpad(this.closest(\'.card\'))">'
+                    f'<span class="name">{name}</span></div>{details}</div>')
         details = f'<div class="details">{fields}<div class="out"></div></div>'
         live = "true" if meta.get("live") else "false"
         return (f'<div class="card" data-cmd="{name}" data-live="{live}"><div class="row" '
