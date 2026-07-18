@@ -34,7 +34,6 @@ import inspect
 import json
 import os
 import queue
-import shlex
 import subprocess
 import threading
 import time
@@ -639,6 +638,10 @@ def _capture_screen_jpeg(quality: int = 55, max_w: int = 1280) -> bytes:
     user32 = ctypes.windll.user32
     gdi32 = ctypes.windll.gdi32
     gdi = ctypes.windll.gdiplus
+    # Make the call DPI-aware so GetSystemMetrics returns the real physical
+    # screen size (otherwise on a scaled display it returns the logical size
+    # while the DC is at physical resolution, causing a zoomed-in capture).
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_AWARE
     sw = user32.GetSystemMetrics(0)
     sh = user32.GetSystemMetrics(1)
     if sw <= 0 or sh <= 0:
@@ -766,6 +769,138 @@ def mousedrag(action: str = "down", button: str = "left"):
     return {"status": "drag_" + action, "button": button}
 
 
+# --- Keyboard input via SendInput (type into the focused window) ---
+# SendInput synthesizes real keystrokes, so the text goes into whatever
+# window currently has focus — just like typing on a physical keyboard.
+# Great for 2FA codes, URLs, search boxes, and passwords (never touches
+# the clipboard, so clipboard loggers can't see it).
+
+# Input type constants
+INPUT_KEYBOARD = 1
+KEYEVENTF_UNICODE = 0x0004
+KEYEVENTF_KEYUP = 0x0002
+
+
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
+                ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.c_void_p)]
+
+
+class _INPUT(ctypes.Structure):
+    class _INPUT_UNION(ctypes.Union):
+        _fields_ = [("ki", _KEYBDINPUT)]
+    _anonymous_ = ("u",)
+    _fields_ = [("type", wintypes.DWORD), ("u", _INPUT_UNION)]
+
+
+def _type_text(text: str):
+    """Type a string into the focused window via SendInput (Unicode)."""
+    user32 = ctypes.windll.user32
+    user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_INPUT),
+                                 ctypes.c_int]
+    user32.SendInput.restype = wintypes.UINT
+    for ch in text:
+        code = ord(ch)
+        # Key down + key up for each Unicode character.
+        inputs = (_INPUT * 2)()
+        inputs[0].type = INPUT_KEYBOARD
+        inputs[0].ki.wScan = code
+        inputs[0].ki.dwFlags = KEYEVENTF_UNICODE
+        inputs[1].type = INPUT_KEYBOARD
+        inputs[1].ki.wScan = code
+        inputs[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+        user32.SendInput(2, inputs, ctypes.sizeof(_INPUT))
+
+
+def _type_key(vk: int):
+    """Press and release a single virtual key (e.g. VK_RETURN=0x0D)."""
+    user32 = ctypes.windll.user32
+    user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_INPUT),
+                                 ctypes.c_int]
+    user32.SendInput.restype = wintypes.UINT
+    inputs = (_INPUT * 2)()
+    inputs[0].type = INPUT_KEYBOARD
+    inputs[0].ki.wVk = vk
+    inputs[1].type = INPUT_KEYBOARD
+    inputs[1].ki.wVk = vk
+    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP
+    user32.SendInput(2, inputs, ctypes.sizeof(_INPUT))
+
+
+@command("type", "Type text into the focused window on the PC.", hide=True)
+def type_text(text: str = ""):
+    if not text:
+        return {"status": "empty"}
+    _type_text(text)
+    return {"status": "typed", "length": len(text)}
+
+
+# Virtual key codes for modifier keys and common special keys.
+_VK_MAP = {
+    "ctrl": 0x11, "control": 0x11, "alt": 0x12, "menu": 0x12,
+    "shift": 0x10, "win": 0x5B, "meta": 0x5B, "super": 0x5B,
+    "enter": 0x0D, "return": 0x0D, "tab": 0x09, "esc": 0x1B, "escape": 0x1B,
+    "backspace": 0x08, "delete": 0x2E, "del": 0x2E,
+    "space": 0x20, "spacebar": 0x20,
+    "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+    "home": 0x24, "end": 0x23, "pageup": 0x21, "pagedown": 0x22,
+    "pgup": 0x21, "pgdn": 0x22,
+    "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73, "f5": 0x74,
+    "f6": 0x75, "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79,
+    "f11": 0x7A, "f12": 0x7B,
+    "prtsc": 0x2C, "printscreen": 0x2C, "scrolllock": 0x91, "pause": 0x13,
+    "capslock": 0x14, "numlock": 0x90, "insert": 0x2D,
+}
+
+
+def _send_key_combo(combo: str):
+    """Send a key combination like 'ctrl+x', 'alt+tab', 'win+d', or 'enter'.
+
+    Modifiers (ctrl/alt/shift/win) are pressed first, then the main key, then
+    everything is released in reverse order. A bare key name with no '+'
+    (e.g. 'enter', 'f5') just presses that key.
+    """
+    parts = [p.strip().lower() for p in combo.split("+") if p.strip()]
+    if not parts:
+        return
+    user32 = ctypes.windll.user32
+    user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_INPUT),
+                                 ctypes.c_int]
+    user32.SendInput.restype = wintypes.UINT
+    # Resolve each part to a VK code. Single chars -> their ASCII code.
+    vks = []
+    for p in parts:
+        if p in _VK_MAP:
+            vks.append(_VK_MAP[p])
+        elif len(p) == 1:
+            vks.append(ord(p.upper()))
+        else:
+            raise ValueError(f"unknown key: {p}")
+    # Build the input sequence: press all keys in order, then release in reverse.
+    n = len(vks) * 2
+    inputs = (_INPUT * n)()
+    for i, vk in enumerate(vks):
+        inputs[i].type = INPUT_KEYBOARD
+        inputs[i].ki.wVk = vk
+    for i, vk in enumerate(reversed(vks)):
+        inputs[len(vks) + i].type = INPUT_KEYBOARD
+        inputs[len(vks) + i].ki.wVk = vk
+        inputs[len(vks) + i].ki.dwFlags = KEYEVENTF_KEYUP
+    user32.SendInput(n, inputs, ctypes.sizeof(_INPUT))
+
+
+@command("keys", "Send a key combination (e.g. ctrl+x, alt+tab, win+d, enter).", hide=True)
+def keys(combo: str = ""):
+    if not combo.strip():
+        return {"error": "no combo"}
+    try:
+        _send_key_combo(combo)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    return {"status": "sent", "combo": combo}
+
+
 @command("copy", "Read the PC clipboard and return its text.", tab="tools")
 def copy():
     out = subprocess.run([POWERSHELL, "-NoProfile", "-Command", "Get-Clipboard"],
@@ -789,60 +924,7 @@ def paste(text: str = ""):
     return {"status": "copied", "length": len(text)}
 
 
-@command("ps", "Run a PowerShell command on the PC and return its output.", tab="tools")
-def ps(command: str = ""):
-    if not command.strip():
-        return {"error": "no command"}
-    # Enable ANSI color if running on PowerShell 7+ ($PSStyle only exists
-    # there). On Windows PowerShell 5.1 this is a no-op and formatting stays
-    # plain, which is fine — 5.1 never emitted ANSI anyway.
-    wrapped = (
-        "$ErrorActionPreference='Continue';"
-        "if (Get-Variable PSStyle -ErrorAction SilentlyContinue) {"
-        "  $PSStyle.OutputRendering='ANSI'"
-        "};"
-        f"& {{ {command} }}"
-    )
-    try:
-        out = subprocess.run([POWERSHELL, "-NoProfile", "-Command", wrapped],
-                             capture_output=True, text=True, timeout=60,
-                             **_SUBPROC_KWARGS)
-        return {"stdout": out.stdout, "stderr": out.stderr, "exit": out.returncode,
-                "ansi": True}
-    except subprocess.TimeoutExpired:
-        return {"error": "timeout", "detail": "command exceeded 60s"}
-    except Exception as exc:
-        return {"error": str(exc)}
 
-
-@command("wsl", "Run a shell command in WSL (default distro) and return output.", tab="tools")
-def wsl(command: str = ""):
-    if not command.strip():
-        return {"error": "no command"}
-    # Run under `script` with a pty so tools think they're attached to a
-    # terminal and emit ANSI color (ls --color, grep --color, etc.). The
-    # leading `export` ensures common tools default to color even without a
-    # pty. `script -qec` runs the command quietly and returns the raw stream.
-    inner = (
-        "export TERM=xterm-256color CLICOLOR_FORCE=1;"
-        f"{command}"
-    )
-    try:
-        out = subprocess.run(["wsl", "--", "bash", "-lc",
-                              f"script -qec {shlex.quote(inner)} /dev/null"],
-                             capture_output=True, text=True, timeout=60,
-                             **_SUBPROC_KWARGS)
-        stdout = out.stdout
-        # `script` wraps output in \r\n; normalize to \n for display.
-        stdout = stdout.replace("\r\n", "\n").replace("\r", "\n")
-        return {"stdout": stdout, "stderr": out.stderr, "exit": out.returncode,
-                "ansi": True}
-    except FileNotFoundError:
-        return {"error": "wsl not installed"}
-    except subprocess.TimeoutExpired:
-        return {"error": "timeout", "detail": "command exceeded 60s"}
-    except Exception as exc:
-        return {"error": str(exc)}
 
 
 @command("sendlink", "Open a URL in the PC's default browser.", tab="tools")
@@ -867,6 +949,231 @@ def sendfile():
 @command("trackpad", "Turn this page into a remote trackpad with a live screen preview.", primary=True)
 def trackpad():
     return {"status": "ready"}
+
+
+# --- Interactive terminal via ConPTY (Windows pseudo-console) ---
+# ConPTY gives a real PTY, so the shell renders its own prompt, colors,
+# cursor, and tab-completion exactly as in a real terminal. We spawn
+# powershell.exe (or wsl bash) attached to a ConPTY, then pump bytes
+# between the PTY and a WebSocket. The browser renders the raw output
+# (ANSI escapes) in a <pre> via xterm.js-free minimal styling.
+import struct as _struct
+
+# kernel32 / kernelbase ConPTY functions
+class _COORD(ctypes.Structure):
+    _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+_kernel32 = ctypes.windll.kernel32
+_kernel32.CreatePseudoConsole.argtypes = [_COORD, wintypes.HANDLE,
+                                          wintypes.HANDLE, wintypes.DWORD,
+                                          ctypes.POINTER(ctypes.c_void_p)]
+_kernel32.CreatePseudoConsole.restype = ctypes.c_long  # HRESULT
+_kernel32.ClosePseudoConsole.argtypes = [ctypes.c_void_p]
+_kernel32.ResizePseudoConsole.argtypes = [ctypes.c_void_p, _COORD]
+_kernel32.ResizePseudoConsole.restype = ctypes.c_long  # HRESULT
+_kernel32.InitializeProcThreadAttributeList.argtypes = [ctypes.c_void_p, wintypes.DWORD,
+    wintypes.DWORD, ctypes.POINTER(ctypes.c_size_t)]
+_kernel32.InitializeProcThreadAttributeList.restype = wintypes.BOOL
+_kernel32.UpdateProcThreadAttribute.argtypes = [ctypes.c_void_p, wintypes.DWORD,
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_size_t)]
+_kernel32.UpdateProcThreadAttribute.restype = wintypes.BOOL
+_kernel32.DeleteProcThreadAttributeList.argtypes = [ctypes.c_void_p]
+_kernel32.CreateProcessW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, ctypes.c_void_p,
+    ctypes.c_void_p, wintypes.BOOL, wintypes.DWORD, ctypes.c_void_p, wintypes.LPCWSTR,
+    ctypes.c_void_p, ctypes.c_void_p]
+_kernel32.CreateProcessW.restype = wintypes.BOOL
+
+PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016
+EXTENDED_STARTUPINFO_PRESENT = 0x00080000
+CREATE_UNICODE_ENVIRONMENT = 0x00000400
+
+
+class _STARTUPINFO(ctypes.Structure):
+    _fields_ = [("cb", wintypes.DWORD), ("lpReserved", wintypes.LPWSTR),
+                ("lpDesktop", wintypes.LPWSTR), ("lpTitle", wintypes.LPWSTR),
+                ("dwX", wintypes.DWORD), ("dwY", wintypes.DWORD),
+                ("dwXSize", wintypes.DWORD), ("dwYSize", wintypes.DWORD),
+                ("dwXCountChars", wintypes.DWORD), ("dwYCountChars", wintypes.DWORD),
+                ("dwFillAttribute", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                ("wShowWindow", wintypes.WORD), ("cbReserved2", wintypes.WORD),
+                ("lpReserved2", ctypes.c_void_p), ("hStdInput", wintypes.HANDLE),
+                ("hStdOutput", wintypes.HANDLE), ("hStdError", wintypes.HANDLE)]
+
+
+class _STARTUPINFOEX(ctypes.Structure):
+    _fields_ = [("StartupInfo", _STARTUPINFO), ("lpAttributeList", ctypes.c_void_p)]
+
+
+class _PROCESS_INFORMATION(ctypes.Structure):
+    _fields_ = [("hProcess", wintypes.HANDLE), ("hThread", wintypes.HANDLE),
+                ("dwProcessId", wintypes.DWORD), ("dwThreadId", wintypes.DWORD)]
+
+
+class _SECURITY_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [("nLength", wintypes.DWORD), ("lpSecurityDescriptor", ctypes.c_void_p),
+                ("bInheritHandle", wintypes.BOOL)]
+
+
+class _ConPtySession:
+    """A single ConPTY-backed shell session. Lives for the duration of a
+    WebSocket connection. Bytes from the shell are read on a worker thread
+    and pushed to a queue; the WS handler forwards them to the browser."""
+
+    def __init__(self, cols: int = 100, rows: int = 30, shell: str = ""):
+        self.cols = max(20, min(300, cols))
+        self.rows = max(5, min(100, rows))
+        self.shell = shell or "ps"
+        self.hPC = None
+        self.hProcess = None
+        self.hThread = None
+        self.dwProcessId = 0
+        self._pipe_in = None   # we write to this -> shell reads
+        self._pipe_out = None  # shell writes to this -> we read
+        self._reader = None
+        self._out_q: queue.Queue = queue.Queue()
+        self._closed = False
+
+    def start(self):
+        # Create a pipe pair for PTY input (we write, shell reads).
+        sa = _SECURITY_ATTRIBUTES()
+        sa.nLength = ctypes.sizeof(sa)
+        sa.bInheritHandle = True
+        pipe_in_read = wintypes.HANDLE()
+        pipe_in_write = wintypes.HANDLE()
+        pipe_out_read = wintypes.HANDLE()
+        pipe_out_write = wintypes.HANDLE()
+        if not _kernel32.CreatePipe(ctypes.byref(pipe_in_read), ctypes.byref(pipe_in_write),
+                                    ctypes.byref(sa), 0):
+            raise OSError("CreatePipe(in) failed")
+        if not _kernel32.CreatePipe(ctypes.byref(pipe_out_read), ctypes.byref(pipe_out_write),
+                                    ctypes.byref(sa), 0):
+            raise OSError("CreatePipe(out) failed")
+        # The shell-side ends must be inheritable; our ends must NOT be.
+        _kernel32.SetHandleInformation(pipe_in_write, 2, 2)   # HANDLE_FLAG_INHERIT
+        _kernel32.SetHandleInformation(pipe_out_read, 2, 2)
+        _kernel32.SetHandleInformation(pipe_in_read, 2, 0)
+        _kernel32.SetHandleInformation(pipe_out_write, 2, 0)
+        # Create the pseudo console.
+        size = _COORD(self.cols, self.rows)
+        phPC = ctypes.c_void_p(0)
+        hr = _kernel32.CreatePseudoConsole(size, pipe_in_read, pipe_out_write, 0,
+                                           ctypes.byref(phPC))
+        if hr != 0:
+            raise OSError(f"CreatePseudoConsole failed: 0x{hr & 0xFFFFFFFF:08X}")
+        self.hPC = phPC
+        # Close the shell-side pipe ends (the ConPTY owns them now).
+        _kernel32.CloseHandle(pipe_in_read)
+        _kernel32.CloseHandle(pipe_out_write)
+        self._pipe_in = pipe_in_write   # we write input here
+        self._pipe_out = pipe_out_read  # we read output here
+        # Build the proc thread attribute list with the pseudoconsole.
+        attr_size = ctypes.c_size_t(0)
+        _kernel32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(attr_size))
+        buf = (ctypes.c_byte * attr_size.value)()
+        attr_list = ctypes.cast(buf, ctypes.c_void_p)
+        if not _kernel32.InitializeProcThreadAttributeList(attr_list, 1, 0,
+                                                           ctypes.byref(attr_size)):
+            raise OSError("InitializeProcThreadAttributeList failed")
+        if not _kernel32.UpdateProcThreadAttribute(attr_list, 0,
+                ctypes.c_void_p(PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE), self.hPC,
+                ctypes.sizeof(ctypes.c_void_p), None, None):
+            raise OSError("UpdateProcThreadAttribute failed")
+        # STARTUPINFOEX.
+        si = _STARTUPINFOEX()
+        si.StartupInfo.cb = ctypes.sizeof(si)
+        si.lpAttributeList = attr_list
+        pi = _PROCESS_INFORMATION()
+        # Choose the shell command line.
+        if self.shell == "wsl":
+            cmdline = r'wsl.exe -- bash -l'
+        else:
+            cmdline = r'powershell.exe -NoLogo -NoProfile'
+        cmdline_buf = ctypes.create_unicode_buffer(cmdline)
+        flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT
+        ok = _kernel32.CreateProcessW(None, cmdline_buf, None, None, False, flags,
+                                      None, None, ctypes.byref(si), ctypes.byref(pi))
+        if not ok:
+            err = ctypes.get_last_error()
+            raise OSError(f"CreateProcessW failed: {err}")
+        self.hProcess = pi.hProcess
+        self.hThread = pi.hThread
+        self.dwProcessId = pi.dwProcessId
+        self._attr_list = attr_list
+        self._attr_buf = buf
+        # Start the output reader thread.
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+
+    def _read_loop(self):
+        """Read output from the ConPTY and push to the queue."""
+        buf = (ctypes.c_char * 4096)()
+        while not self._closed:
+            n = wintypes.DWORD(0)
+            ok = _kernel32.ReadFile(self._pipe_out, buf, 4096, ctypes.byref(n), None)
+            if not ok or n.value == 0:
+                break
+            self._out_q.put(buf.raw[:n.value])
+
+    def write(self, data: bytes):
+        """Send input to the shell."""
+        if self._closed or self._pipe_in is None:
+            return
+        written = wintypes.DWORD(0)
+        _kernel32.WriteFile(self._pipe_in, data, len(data), ctypes.byref(written), None)
+
+    def resize(self, cols: int, rows: int):
+        if self._closed or self.hPC is None:
+            return
+        size = _COORD(max(20, min(300, cols)), max(5, min(100, rows)))
+        _kernel32.ResizePseudoConsole(self.hPC, size)
+
+    def read(self, timeout: float = 0.05) -> bytes | None:
+        try:
+            return self._out_q.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self.hPC:
+                _kernel32.ClosePseudoConsole(self.hPC)
+        except Exception:
+            pass
+        try:
+            if self._pipe_in:
+                _kernel32.CloseHandle(self._pipe_in)
+        except Exception:
+            pass
+        try:
+            if self._pipe_out:
+                _kernel32.CloseHandle(self._pipe_out)
+        except Exception:
+            pass
+        try:
+            if self.hProcess:
+                _kernel32.WaitForSingleObject(self.hProcess, 1000)
+                _kernel32.CloseHandle(self.hProcess)
+        except Exception:
+            pass
+        try:
+            if self.hThread:
+                _kernel32.CloseHandle(self.hThread)
+        except Exception:
+            pass
+        try:
+            if self._attr_list:
+                _kernel32.DeleteProcThreadAttributeList(self._attr_list)
+        except Exception:
+            pass
+
+
+@command("terminal", "Open an interactive terminal (PowerShell or WSL bash) with a real prompt, colors, and history.", primary=True)
+def terminal(shell: str = "ps"):
+    return {"status": "ready", "shell": shell}
 
 
 @command("brightness", "Set monitor brightness (0-100).", range=["level"], tab="media", live=True)
@@ -1032,6 +1339,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_stream(query)
         if route == "/ws":
             return self._handle_ws(query)
+        if route == "/term":
+            return self._handle_term_ws(query)
         return self._run(route.lstrip("/"), query)
 
     def do_POST(self):
@@ -1109,8 +1418,115 @@ class Handler(BaseHTTPRequestHandler):
                     _mouse_button_down(msg.get("button", "left"))
                 elif m == "up":
                     _mouse_button_up(msg.get("button", "left"))
-        except (OSError, ValueError, struct.error):
+        except (OSError, ValueError, _struct.error):
             pass  # client disconnected
+
+    @staticmethod
+    def _ws_read_frame(rfile):
+        """Read one WebSocket frame from rfile. Returns (opcode, payload) or
+        (None, None) on disconnect."""
+        import struct
+        hdr = rfile.read(2)
+        if len(hdr) < 2:
+            return None, None
+        b0, b1 = hdr[0], hdr[1]
+        opcode = b0 & 0x0F
+        masked = b1 & 0x80
+        plen = b1 & 0x7F
+        if plen == 126:
+            plen = struct.unpack("!H", rfile.read(2))[0]
+        elif plen == 127:
+            plen = struct.unpack("!Q", rfile.read(8))[0]
+        mask = rfile.read(4) if masked else b""
+        payload = rfile.read(plen)
+        if masked:
+            payload = bytes(payload[i] ^ mask[i % 4] for i in range(len(payload)))
+        return opcode, payload
+
+    @staticmethod
+    def _ws_write_frame(wfile, payload: bytes, opcode: int = 0x1):
+        """Write a WebSocket text/binary frame to wfile (server->client,
+        unmasked)."""
+        import struct
+        b0 = 0x80 | opcode  # FIN + opcode
+        n = len(payload)
+        if n < 126:
+            header = struct.pack("!BB", b0, n)
+        elif n < 65536:
+            header = struct.pack("!BBH", b0, 126, n)
+        else:
+            header = struct.pack("!BBQ", b0, 127, n)
+        wfile.write(header + payload)
+        wfile.flush()
+
+    def _handle_term_ws(self, query: dict):
+        """WebSocket endpoint for an interactive ConPTY terminal session."""
+        if not self._authorized(query):
+            return
+        import hashlib
+        import base64
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        if not key:
+            self.send_response(400)
+            self.end_headers()
+            return
+        accept = base64.b64encode(
+            hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode())
+            .digest()).decode()
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.end_headers()
+        shell = query.get("shell", ["ps"])[0]
+        cols = int(query.get("cols", ["100"])[0])
+        rows = int(query.get("rows", ["30"])[0])
+        try:
+            session = _ConPtySession(cols=cols, rows=rows, shell=shell)
+            session.start()
+        except Exception as exc:
+            self._ws_write_frame(self.wfile, json.dumps(
+                {"error": str(exc)}).encode("utf-8"))
+            return
+        rfile = self.rfile
+        wfile = self.wfile
+        # Run the output pump on a dedicated thread so the shell's output
+        # (prompt, command results) is forwarded to the browser immediately,
+        # without waiting for the client to send a message first.
+        pump_stop = threading.Event()
+        def _pump():
+            while not pump_stop.is_set():
+                chunk = session.read(timeout=0.1)
+                if chunk is not None:
+                    try:
+                        self._ws_write_frame(wfile, chunk, opcode=0x2)
+                    except (OSError, ValueError):
+                        break
+        pump = threading.Thread(target=_pump, daemon=True)
+        pump.start()
+        try:
+            while True:
+                opcode, payload = self._ws_read_frame(rfile)
+                if opcode is None or opcode == 0x8:  # close / disconnect
+                    break
+                if opcode == 0x1:  # text frame = JSON control message
+                    try:
+                        msg = json.loads(payload.decode("utf-8"))
+                    except Exception:
+                        continue
+                    m = msg.get("m")
+                    if m == "input":
+                        session.write(msg.get("data", "").encode("utf-8"))
+                    elif m == "resize":
+                        session.resize(int(msg.get("cols", 100)),
+                                       int(msg.get("rows", 30)))
+                elif opcode == 0x2:  # binary frame = raw input bytes
+                    session.write(payload)
+        except (OSError, ValueError, _struct.error):
+            pass
+        finally:
+            pump_stop.set()
+            session.close()
 
     def _serve_stream(self, query: dict):
         """Single-frame screen capture as JPEG. The trackpad polls this."""
@@ -1325,19 +1741,14 @@ class Handler(BaseHTTPRequestHandler):
         .trackpad.open{{display:flex}}
         .trackpad .preview{{position:relative;width:100%;background:#000;
         border:1px solid #2a2f3a;border-radius:8px;overflow:hidden;
-        aspect-ratio:16/9}}
-        .trackpad .preview img{{width:100%;height:100%;object-fit:contain;
-        display:block}}
+        line-height:0}}
+        .trackpad .preview img{{width:100%;height:auto;display:block}}
         .trackpad .preview .badge{{position:absolute;top:6px;left:8px;
         font-size:.7rem;color:#9aa4b2;background:rgba(0,0,0,.5);padding:1px 6px;
         border-radius:4px}}
         .trackpad .pad{{flex:1 1 auto;min-height:180px;background:#0f1115;
         border:1px solid #2a2f3a;border-radius:10px;touch-action:none;
-        user-select:none;-webkit-user-select:none;position:relative;
-        display:flex;align-items:center;justify-content:center;color:#5b6473;
-        font-size:.85rem}}
-        .trackpad .pad.hint::before{{content:"drag to move · tap = click · "
-        "double-tap = right click · double-tap+hold+drag = drag"}}
+        user-select:none;-webkit-user-select:none;position:relative}}
         .trackpad .btns{{display:flex;gap:.5rem}}
         .trackpad .btns button{{flex:1;background:#171a21;border:1px solid #2a2f3a;
         color:#e6e6e6;padding:.6rem;border-radius:8px;font-weight:600;
@@ -1348,6 +1759,44 @@ class Handler(BaseHTTPRequestHandler):
         .trackpad .ctrls label{{display:flex;align-items:center;gap:.3rem}}
         .trackpad .ctrls input[type=range]{{width:120px}}
         .trackpad .ctrls .fps{{margin-left:auto;font-variant-numeric:tabular-nums}}
+        .trackpad .kb-row{{display:flex;gap:.4rem}}
+        .trackpad .kb-row input{{flex:1;background:#0f1115;border:1px solid #2a2f3a;
+        color:#e6e6e6;border-radius:6px;padding:.4rem .6rem;font-size:.85rem}}
+        .trackpad .kb-row button{{background:#4da3ff;color:#0f1115;border:0;
+        padding:.4rem .7rem;border-radius:6px;font-weight:600;cursor:pointer;
+        font-size:.85rem;flex:none}}
+        .trackpad .kb-row button:last-child{{background:#171a21;color:#e6e6e6;
+        border:1px solid #2a2f3a}}
+        .trackpad .kb-shortcuts{{display:flex;gap:.3rem;flex-wrap:wrap}}
+        .trackpad .kb-shortcuts button{{background:#171a21;border:1px solid #2a2f3a;
+        color:#9aa4b2;padding:.3rem .5rem;border-radius:5px;cursor:pointer;
+        font-size:.75rem}}
+        /* Terminal card */
+        .term{{display:none;flex-direction:column;gap:.4rem;padding:.5rem}}
+        .term.open{{display:flex}}
+        .term .screen{{background:#0c0c0c;border:1px solid #2a2f3a;border-radius:6px;
+        font-family:ui-monospace,"Cascadia Code",Consolas,monospace;font-size:.78rem;
+        line-height:1.35;color:#cccccc;padding:.5rem;overflow:auto;
+        white-space:pre;height:10rem;touch-action:pan-y;
+        -webkit-overflow-scrolling:touch}}
+        .term .screen .cursor{{display:inline-block;width:.55em;height:1em;
+        background:#ccc;vertical-align:bottom;animation:blink 1s step-end infinite}}
+        @keyframes blink{{50%{{opacity:0}}}}
+        .term .bar{{display:flex;gap:.4rem;align-items:center;font-size:.8rem;
+        color:#9aa4b2;flex-wrap:wrap}}
+        .term .bar select{{background:#0f1115;border:1px solid #2a2f3a;color:#e6e6e6;
+        border-radius:4px;padding:.2rem .4rem;font-size:.8rem}}
+        .term .bar button{{background:#171a21;border:1px solid #2a2f3a;color:#e6e6e6;
+        padding:.3rem .6rem;border-radius:4px;cursor:pointer;font-size:.8rem}}
+        .term .bar button:active{{background:#222732}}
+        .term .bar .status{{margin-left:auto;font-size:.75rem;color:#5b6473}}
+        .term .input-row{{display:flex;gap:.4rem}}
+        .term .input-row input{{flex:1;background:#0f1115;border:1px solid #2a2f3a;
+        color:#e6e6e6;border-radius:6px;padding:.4rem .6rem;font-family:inherit;
+        font-size:.8rem}}
+        .term .input-row button{{background:#4da3ff;color:#0f1115;border:0;
+        padding:.4rem .8rem;border-radius:6px;font-weight:600;cursor:pointer;
+        font-size:.8rem}}
         </style></head>
         <body><h1>PC Remote Control</h1>{cards}
         <script>
@@ -1436,6 +1885,20 @@ class Handler(BaseHTTPRequestHandler):
               open = true;
             }};
             while (i < text.length) {{
+              // OSC sequence: \x1b] ... \x07 (BEL) or \x1b\\ (ST). Sets window
+              // title etc. — strip it entirely, we don't use it.
+              if (text[i] === '\\x1b' && text[i+1] === ']') {{
+                let j = i + 2;
+                while (j < text.length && text[j] !== '\\x07' &&
+                       !(text[j] === '\\x1b' && text[j+1] === '\\\\')) j++;
+                i = (text[j] === '\\x07') ? j + 1 : j + 2;
+                continue;
+              }}
+              // Other lone ESC sequences (e.g. \x1b= keypad mode) — skip ESC + 1 char.
+              if (text[i] === '\\x1b' && text[i+1] !== '[') {{
+                i += 2;
+                continue;
+              }}
               if (text[i] === '\\x1b' && text[i+1] === '[') {{
                 // CSI sequence. Find the final byte (0x40-0x7E).
                 let j = i + 2;
@@ -1592,6 +2055,8 @@ class Handler(BaseHTTPRequestHandler):
           autoGrow(t);
           t.addEventListener('input', () => autoGrow(t));
         }});
+        // Wire up the terminal input box.
+        document.querySelectorAll('.card[data-cmd="terminal"]').forEach(c => wireTermInput(c));
 
         // --- Send File: upload to /upload (multipart) ---
         async function uploadFile(card) {{
@@ -1674,59 +2139,101 @@ class Handler(BaseHTTPRequestHandler):
           if (pad.dataset.wired) return;
           pad.dataset.wired = '1';
           const sens = () => parseFloat(card.querySelector('#tp-sens').value);
+          // Gesture scheme:
+          //   one-finger drag  = move cursor
+          //   one-finger tap   = left click
+          //   two-finger tap   = right click
+          //   two-finger drag  = left drag (hold button, move, release)
+          let touch = null;       // single-finger state
+          let twoFinger = false;
+          let twoStart = null;     // {{x, y, startX, startY, moved}}
           pad.addEventListener('touchstart', e => {{
-            if (e.touches.length !== 1) return;
             e.preventDefault();
-            const t = e.touches[0];
-            tpLast = {{x:t.clientX, y:t.clientY}};
-            tpDownAt = performance.now(); tpMoved = false;
-            tpDragPending = false; tpDragging = false;
+            if (e.touches.length === 1) {{
+              const t = e.touches[0];
+              touch = {{x:t.clientX, y:t.clientY, startX:t.clientX,
+                        startY:t.clientY, startTime:performance.now(),
+                        moved:false}};
+              twoFinger = false; twoStart = null;
+            }} else if (e.touches.length === 2) {{
+              twoFinger = true;
+              touch = null;  // abandon single-finger gesture
+              const t = e.touches[0];
+              twoStart = {{x:t.clientX, y:t.clientY, startX:t.clientX,
+                           startY:t.clientY, moved:false, dragging:false}};
+            }}
           }}, {{passive:false}});
           pad.addEventListener('touchmove', e => {{
-            if (e.touches.length !== 1 || !tpLast) return;
             e.preventDefault();
-            const t = e.touches[0];
-            const dx = (t.clientX - tpLast.x) * sens();
-            const dy = (t.clientY - tpLast.y) * sens();
-            if (Math.abs(t.clientX - tpLast.x) > 4 || Math.abs(t.clientY - tpLast.y) > 4)
-              tpMoved = true;
-            if (tpDragPending) {{
-              // double-tap+hold drag: press button on first move, then move.
-              mouseCmd('mousedrag', {{action:'down'}});
-              tpDragPending = false; tpDragging = true;
+            if (twoFinger && twoStart) {{
+              const t = e.touches[0];
+              const dx = (t.clientX - twoStart.x) * sens();
+              const dy = (t.clientY - twoStart.y) * sens();
+              if (Math.abs(t.clientX - twoStart.startX) > 6 ||
+                  Math.abs(t.clientY - twoStart.startY) > 6)
+                twoStart.moved = true;
+              // On first significant move, press the left button down.
+              if (twoStart.moved && !twoStart.dragging) {{
+                mouseCmd('mousedrag', {{action:'down', button:'left'}});
+                twoStart.dragging = true;
+              }}
+              if (twoStart.dragging)
+                mouseCmd('mousemove', {{dx:Math.round(dx), dy:Math.round(dy)}});
+              twoStart.x = t.clientX;
+              twoStart.y = t.clientY;
+              return;
             }}
+            if (!touch) return;
+            const t = e.touches[0];
+            const dx = (t.clientX - touch.x) * sens();
+            const dy = (t.clientY - touch.y) * sens();
+            if (Math.abs(t.clientX - touch.startX) > 6 ||
+                Math.abs(t.clientY - touch.startY) > 6)
+              touch.moved = true;
             mouseCmd('mousemove', {{dx:Math.round(dx), dy:Math.round(dy)}});
-            tpLast = {{x:t.clientX, y:t.clientY}};
+            touch.x = t.clientX;
+            touch.y = t.clientY;
           }}, {{passive:false}});
           pad.addEventListener('touchend', e => {{
-            if (!tpLast) return;
-            const dt = performance.now() - tpDownAt;
-            if (tpDragging) {{
-              mouseCmd('mousedrag', {{action:'up'}});
-            }} else if (!tpMoved && dt < 250) {{
-              // tap = left click
-              mouseCmd('mouseclick', {{button:'left'}});
-            }}
-            tpLast = null; tpDragging = false; tpDragPending = false;
-          }});
-          // Double-tap detection: a second tap within 300ms of the first.
-          let lastTap = 0;
-          pad.addEventListener('touchend', () => {{
-            const now = performance.now();
-            if (now - lastTap < 300) {{
-              // double tap: if finger stays down next, begin drag; else right click.
-              // We can't know yet, so arm drag-pending; if no move comes, treat as
-              // right click on the next touchend.
-              tpDragPending = true;
-              setTimeout(() => {{
-                if (tpDragPending) {{  // no drag started -> right click
+            if (twoFinger && twoStart) {{
+              if (e.touches.length === 0) {{
+                if (twoStart.dragging) {{
+                  // Two-finger drag ended — release the left button.
+                  mouseCmd('mousedrag', {{action:'up', button:'left'}});
+                }} else if (!twoStart.moved) {{
+                  // Two-finger tap — right click.
                   mouseCmd('mouseclick', {{button:'right'}});
-                  tpDragPending = false;
                 }}
-              }}, 250);
+                twoFinger = false; twoStart = null;
+              }}
+              return;
             }}
-            lastTap = now;
+            if (!touch) return;
+            const dt = performance.now() - touch.startTime;
+            if (!touch.moved && dt < 300)
+              mouseCmd('mouseclick', {{button:'left'}});
+            touch = null;
           }});
+          // Mouse events for desktop testing.
+          let mouseDown = false, mouseLast = null;
+          pad.addEventListener('mousedown', e => {{
+            mouseDown = true;
+            mouseLast = {{x:e.clientX, y:e.clientY}};
+          }});
+          pad.addEventListener('mousemove', e => {{
+            if (!mouseDown || !mouseLast) return;
+            const dx = (e.clientX - mouseLast.x) * sens();
+            const dy = (e.clientY - mouseLast.y) * sens();
+            mouseCmd('mousemove', {{dx:Math.round(dx), dy:Math.round(dy)}});
+            mouseLast = {{x:e.clientX, y:e.clientY}};
+          }});
+          pad.addEventListener('mouseup', e => {{
+            if (!mouseDown) return;
+            if (e.button === 2) mouseCmd('mouseclick', {{button:'right'}});
+            else if (e.button === 0) mouseCmd('mouseclick', {{button:'left'}});
+            mouseDown = false; mouseLast = null;
+          }});
+          pad.addEventListener('contextmenu', e => e.preventDefault());
         }}
         // Low-latency mouse input over a single persistent WebSocket.
         // Every move is a ~20-byte JSON frame with no HTTP overhead, so the
@@ -1753,6 +2260,132 @@ class Handler(BaseHTTPRequestHandler):
           else if (cmd === 'mousedrag' && body.action === 'up') wsSend({{m:'up', button:body.button||'left'}});
         }}
         function mouseBtn(b) {{ mouseCmd('mouseclick', {{button:b}}); }}
+        // --- Keyboard: type text / send special keys to the focused window ---
+        async function tpSendText() {{
+          const inp = document.getElementById('tp-kb');
+          const text = inp.value;
+          if (!text) return;
+          try {{
+            await fetch('/type?token=' + encodeURIComponent(TOKEN),
+              {{method:'POST', headers:{{'Content-Type':'application/json'}},
+               body: JSON.stringify({{text: text}})}});
+          }} catch (e) {{}}
+          inp.value = '';
+        }}
+        async function tpSendKeys(combo) {{
+          try {{
+            await fetch('/keys?token=' + encodeURIComponent(TOKEN),
+              {{method:'POST', headers:{{'Content-Type':'application/json'}},
+               body: JSON.stringify({{combo: combo}})}});
+          }} catch (e) {{}}
+        }}
+        // Wire up the keyboard input: Enter types the text, then sends Enter.
+        (function() {{
+          const inp = document.getElementById('tp-kb');
+          if (inp && !inp.dataset.wired) {{
+            inp.dataset.wired = '1';
+            inp.addEventListener('keydown', (e) => {{
+              if (e.key === 'Enter') {{
+                e.preventDefault();
+                tpSendText().then(() => tpSendKeys('enter'));
+              }}
+            }});
+          }}
+        }})();
+
+        // --- Interactive terminal over WebSocket + ConPTY ---
+        // The server spawns a real shell (powershell/bash) on a ConPTY and
+        // pumps raw bytes over a WebSocket. We render the ANSI output in a
+        // <pre> and send keystrokes back. This gives a real terminal with
+        // prompt, colors, persistent cwd, tab-completion, and history.
+        let termWs = null, termBuf = '', termScroll = null;
+        function toggleTerminal(card) {{
+          const t = card.querySelector('.term');
+          const open = t.classList.toggle('open');
+          if (open) termConnect(card); else termDisconnect();
+        }}
+        function termConnect(card) {{
+          termDisconnect();
+          const shell = card.querySelector('#term-shell').value;
+          const screen = card.querySelector('#term-screen');
+          const status = card.querySelector('#term-status');
+          screen.textContent = '';
+          termBuf = '';
+          termScroll = screen;
+          status.textContent = 'connecting…';
+          const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+          // Estimate cols/rows from the screen width.
+          const cols = Math.max(40, Math.floor(screen.clientWidth / 7));
+          const rows = Math.max(10, Math.floor(screen.clientHeight / 14));
+          termWs = new WebSocket(proto + '//' + location.host + '/term?token='
+            + encodeURIComponent(TOKEN) + '&shell=' + shell + '&cols=' + cols + '&rows=' + rows);
+          termWs.binaryType = 'arraybuffer';
+          termWs.onopen = () => {{ status.textContent = 'connected'; status.style.color = '#22c55e'; }};
+          termWs.onclose = () => {{ status.textContent = 'disconnected'; status.style.color = '#5b6473'; termWs = null; }};
+          termWs.onerror = () => {{ status.textContent = 'error'; status.style.color = '#ef4444'; }};
+          termWs.onmessage = (ev) => {{
+            let data;
+            if (ev.data instanceof ArrayBuffer) {{
+              data = new TextDecoder().decode(ev.data);
+            }} else {{
+              // Text frame might be JSON error or raw text.
+              try {{ const j = JSON.parse(ev.data); if (j.error) {{ status.textContent = j.error; return; }} }} catch(e) {{}}
+              data = ev.data;
+            }}
+            termBuf += data;
+            // Cap buffer to avoid unbounded growth.
+            if (termBuf.length > 100000) termBuf = termBuf.slice(-80000);
+            termRender(screen);
+          }};
+          // Focus the input when tapping the screen.
+          screen.onclick = () => card.querySelector('#term-input').focus();
+        }}
+        function termDisconnect() {{
+          if (termWs) {{ termWs.close(); termWs = null; }}
+        }}
+        function termReconnect(card) {{ termConnect(card); }}
+        function termClear(card) {{
+          termBuf = '';
+          card.querySelector('#term-screen').textContent = '';
+        }}
+        function termRender(screen) {{
+          // Render the buffer as HTML with ANSI color support.
+          screen.innerHTML = ansiToHtml(termBuf, '', undefined);
+          // Auto-scroll to bottom.
+          screen.scrollTop = screen.scrollHeight;
+        }}
+        function termSendInput(card) {{
+          const inp = card.querySelector('#term-input');
+          const text = inp.value;
+          if (!termWs || termWs.readyState !== 1) return;
+          // Send as a JSON control message with the text + newline.
+          termWs.send(JSON.stringify({{m:'input', data: text + '\\r'}}));
+          inp.value = '';
+        }}
+        // Wire up the input box: Enter sends, arrow keys send escape sequences.
+        function wireTermInput(card) {{
+          const inp = card.querySelector('#term-input');
+          if (inp.dataset.wired) return;
+          inp.dataset.wired = '1';
+          inp.addEventListener('keydown', (e) => {{
+            if (e.key === 'Enter') {{
+              e.preventDefault();
+              termSendInput(card);
+            }} else if (e.key === 'ArrowUp') {{
+              e.preventDefault();
+              if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({{m:'input', data:'\\x1b[A'}}));
+            }} else if (e.key === 'ArrowDown') {{
+              e.preventDefault();
+              if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({{m:'input', data:'\\x1b[B'}}));
+            }} else if (e.key === 'Tab') {{
+              e.preventDefault();
+              if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({{m:'input', data:'\\t'}}));
+            }} else if (e.key === 'c' && e.ctrlKey) {{
+              e.preventDefault();
+              if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({{m:'input', data:'\\x03'}}));
+            }}
+          }});
+        }}
         </script></body></html>"""
         body = html.encode("utf-8")
         self.send_response(200)
@@ -1817,9 +2450,23 @@ class Handler(BaseHTTPRequestHandler):
             details = ('<div class="trackpad">'
                        '<div class="preview"><img alt="screen"><span class="badge">'
                        'connecting…</span></div>'
-                       '<div class="pad hint"></div>'
+                       '<div class="pad"></div>'
                        '<div class="btns"><button onclick="mouseBtn(\'left\')">Left Click</button>'
                        '<button onclick="mouseBtn(\'right\')">Right Click</button></div>'
+                       '<div class="kb-row">'
+                       '<input type="text" id="tp-kb" placeholder="type to send keystrokes to PC…" '
+                       'autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">'
+                       '<button onclick="tpSendText()">Type</button>'
+                       '</div>'
+                       '<div class="kb-shortcuts">'
+                       '<button onclick="tpSendKeys(\'enter\')">⏎</button>'
+                       '<button onclick="tpSendKeys(\'ctrl+c\')">Copy</button>'
+                       '<button onclick="tpSendKeys(\'ctrl+v\')">Paste</button>'
+                       '<button onclick="tpSendKeys(\'ctrl+x\')">Cut</button>'
+                       '<button onclick="tpSendKeys(\'ctrl+z\')">Undo</button>'
+                       '<button onclick="tpSendKeys(\'alt+tab\')">Alt+Tab</button>'
+                       '<button onclick="tpSendKeys(\'win+d\')">Win+D</button>'
+                       '</div>'
                        '<div class="ctrls">'
                        '<label><input type="checkbox" id="tp-stream" checked> Stream</label>'
                        '<label>Sensitivity <input type="range" id="tp-sens" min="3" '
@@ -1830,6 +2477,27 @@ class Handler(BaseHTTPRequestHandler):
             chev = ""
             return (f'<div class="card" data-cmd="{name}" data-live="false">'
                     f'<div class="row" onclick="toggleTrackpad(this.closest(\'.card\'))">'
+                    f'<span class="name">{name}</span>{chev}{ping_flag}'
+                    f'</div>{details}{confirm_box}{undo_box}</div>')
+        if name == "terminal":
+            details = ('<div class="term">'
+                       '<div class="bar">'
+                       '<select id="term-shell"><option value="ps">PowerShell</option>'
+                       '<option value="wsl">WSL bash</option></select>'
+                       '<button onclick="termReconnect(this.closest(\'.card\'))">Reconnect</button>'
+                       '<button onclick="termClear(this.closest(\'.card\'))">Clear</button>'
+                       '<span class="status" id="term-status">disconnected</span>'
+                       '</div>'
+                       '<div class="screen" id="term-screen" tabindex="0"></div>'
+                       '<div class="input-row">'
+                       '<input type="text" id="term-input" placeholder="type a command and press Enter…" '
+                       'autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">'
+                       '<button onclick="termSendInput(this.closest(\'.card\'))">Send</button>'
+                       '</div>'
+                       '<div class="out"></div></div>')
+            chev = ""
+            return (f'<div class="card" data-cmd="{name}" data-live="false">'
+                    f'<div class="row" onclick="toggleTerminal(this.closest(\'.card\'))">'
                     f'<span class="name">{name}</span>{chev}{ping_flag}'
                     f'</div>{details}{confirm_box}{undo_box}</div>')
         details = f'<div class="details">{fields}<div class="out"></div></div>'
