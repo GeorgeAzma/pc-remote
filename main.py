@@ -499,22 +499,51 @@ def monitor(on: bool = False):
 
 
 def _capture_screen_b64() -> str:
-    ps = (
-        "Add-Type -AssemblyName System.Windows.Forms;"
-        "Add-Type -AssemblyName System.Drawing;"
-        "$b = New-Object System.Drawing.Bitmap("
-        "[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width, "
-        "[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height);"
-        "$g = [System.Drawing.Graphics]::FromImage($b);"
-        "$g.CopyFromScreen(0,0,0,0,$b.Size);"
-        "$ms = New-Object System.IO.MemoryStream;"
-        "$b.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png);"
-        "[Convert]::ToBase64String($ms.ToArray())"
-    )
-    out = subprocess.run([POWERSHELL, "-NoProfile", "-Command", ps],
-                         capture_output=True, text=True, check=True,
-                         **_SUBPROC_KWARGS)
-    return out.stdout.strip()
+    """Capture the primary screen as a base64-encoded PNG (fast, in-process).
+
+    Done in-process (GDI+ via ctypes) rather than via a PowerShell subprocess
+    so the capture inherits *this* process's per-monitor DPI awareness. The
+    main process calls SetProcessDpiAwareness(PER_MONITOR_AWARE) at startup,
+    but that flag is process-local and does NOT propagate to child processes —
+    so a PowerShell subprocess is non-DPI-aware and on a high-DPI display its
+    CopyFromScreen captures only the top-left logical-size portion of the
+    physical framebuffer, producing a zoomed/cropped screenshot. Capturing
+    in-process returns the real physical-resolution framebuffer and is also
+    ~10x faster (no process spawn + .NET init).
+    """
+    _init_gdi()
+    user32 = ctypes.windll.user32
+    gdi32 = ctypes.windll.gdi32
+    gdi = ctypes.windll.gdiplus
+    sw = user32.GetSystemMetrics(0)
+    sh = user32.GetSystemMetrics(1)
+    if sw <= 0 or sh <= 0:
+        return ""
+    hdc = user32.GetDC(0)
+    mdc = gdi32.CreateCompatibleDC(hdc)
+    hbmp = gdi32.CreateCompatibleBitmap(hdc, sw, sh)
+    gdi32.SelectObject(mdc, hbmp)
+    gdi32.BitBlt(mdc, 0, 0, sw, sh, hdc, 0, 0, 0x00CC0020)  # SRCCOPY
+    user32.ReleaseDC(0, hdc)
+    # Draw the mouse cursor (BitBlt copies the framebuffer, not the cursor).
+    _draw_cursor(mdc, scale=2)
+    # GDI+ Bitmap from HBITMAP.
+    gdi.GdipCreateBitmapFromHBITMAP.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                                ctypes.POINTER(ctypes.c_void_p)]
+    gdi.GdipCreateBitmapFromHBITMAP.restype = ctypes.c_int
+    bmp = ctypes.c_void_p(0)
+    status = gdi.GdipCreateBitmapFromHBITMAP(hbmp, None, ctypes.byref(bmp))
+    gdi32.DeleteObject(hbmp)
+    gdi32.DeleteDC(mdc)
+    if status != 0 or not bmp.value:
+        return ""
+    data = _encode_png_memory(bmp)
+    gdi.GdipDisposeImage.argtypes = [ctypes.c_void_p]
+    gdi.GdipDisposeImage(bmp)
+    if not data:
+        return ""
+    import base64
+    return base64.b64encode(data).decode("ascii")
 
 
 # --- Fast dependency-free screen capture (GDI+ via ctypes) ---
@@ -806,6 +835,47 @@ def _encode_jpeg_memory(bmp, quality):
     gdi.GdipSaveImageToStream.restype = ctypes.c_int
     status = gdi.GdipSaveImageToStream(bmp, stream, ctypes.byref(enc),
                                        ctypes.byref(params))
+    if status != 0:
+        _release_com(stream)
+        return None
+    hg = ctypes.c_void_p(0)
+    _ole32.GetHGlobalFromStream(stream, ctypes.byref(hg))
+    if not hg.value:
+        _release_com(stream)
+        return None
+    size = _k32.GlobalSize(hg)
+    ptr = _k32.GlobalLock(hg)
+    if not ptr:
+        _release_com(stream)
+        return None
+    try:
+        data = ctypes.string_at(ptr, size)
+    finally:
+        _k32.GlobalUnlock(hg)
+    _release_com(stream)
+    return data
+
+
+def _encode_png_memory(bmp):
+    """Encode a GDI+ bitmap as PNG bytes in memory via IStream (no disk I/O).
+    Returns None on failure. PNG is lossless, so unlike the JPEG path no
+    encoder parameters are needed (Quality is JPEG-only)."""
+    gdi = ctypes.windll.gdiplus
+    class _GUID(ctypes.Structure):
+        _fields_ = [("Data1", ctypes.c_uint32), ("Data2", ctypes.c_uint16),
+                    ("Data3", ctypes.c_uint16), ("Data4", ctypes.c_ubyte * 8)]
+    # PNG encoder CLSID: {557CF406-1A04-11D3-9A73-0000F81EF32E}
+    enc = _GUID(0x557CF406, 0x1A04, 0x11D3,
+                (ctypes.c_ubyte * 8)(0x9A, 0x73, 0x00, 0x00, 0xF8, 0x1E, 0xF3, 0x2E))
+    stream = ctypes.c_void_p(0)
+    hr = _ole32.CreateStreamOnHGlobal(None, True, ctypes.byref(stream))
+    if hr != 0 or not stream.value:
+        return None
+    gdi.GdipSaveImageToStream.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                          ctypes.c_void_p, ctypes.c_void_p]
+    gdi.GdipSaveImageToStream.restype = ctypes.c_int
+    # No EncoderParameters for PNG (pass NULL).
+    status = gdi.GdipSaveImageToStream(bmp, stream, ctypes.byref(enc), None)
     if status != 0:
         _release_com(stream)
         return None
