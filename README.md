@@ -1,4 +1,4 @@
-![image](image.png)
+![image1](image-1.png)
 Launches Web UI on 0.0.0.0:1024 that allows anyone on same network to control the Windows PC.
 I use it to turn off my PC from my phone when I'm too lazy to get up.
 
@@ -49,3 +49,5 @@ Only use this if you don't need `bluetooth`/`wifi` (they require elevation).
 2. Copy `launch_remote.bat` (or a shortcut to it) into that folder.
 
 The server starts at next login. Open `http://<PC-IP>:1024/` from your phone. 
+
+![image2](image-2.png)
