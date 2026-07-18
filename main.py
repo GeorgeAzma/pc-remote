@@ -34,6 +34,7 @@ import inspect
 import json
 import os
 import queue
+import shlex
 import subprocess
 import threading
 import time
@@ -561,6 +562,77 @@ def _init_gdi():
         _gdi_initialized = True
 
 
+def _draw_cursor(mdc, scale: int = 2):
+    """Draw the current mouse cursor onto a memory DC, enlarged by `scale`.
+
+    Uses GetCursorInfo (handles hidden cursors and the I-beam etc.) and
+    DrawIconEx to blit the icon sprite at the cursor's screen position.
+    """
+    class _CURSORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_uint32),
+                    ("flags", ctypes.c_uint32),
+                    ("hCursor", ctypes.c_void_p),
+                    ("ptScreenPos", ctypes.c_long * 2)]
+
+    ci = _CURSORINFO()
+    ci.cbSize = ctypes.sizeof(ci)
+    user32 = ctypes.windll.user32
+    user32.GetCursorInfo.argtypes = [ctypes.POINTER(_CURSORINFO)]
+    user32.GetCursorInfo.restype = wintypes.BOOL
+    if not user32.GetCursorInfo(ctypes.byref(ci)):
+        return
+    # flags & 1 == CURSOR_SHOWING; if not, the cursor is hidden.
+    if not (ci.flags & 1) or not ci.hCursor:
+        return
+    x, y = ci.ptScreenPos[0], ci.ptScreenPos[1]
+    # Get the icon's nominal size so we can scale it up.
+    class _ICONINFO(ctypes.Structure):
+        _fields_ = [("fIcon", wintypes.BOOL), ("xHotspot", wintypes.DWORD),
+                    ("yHotspot", wintypes.DWORD), ("hbmMask", ctypes.c_void_p),
+                    ("hbmColor", ctypes.c_void_p)]
+    user32.GetIconInfo.argtypes = [ctypes.c_void_p,
+                                   ctypes.POINTER(_ICONINFO)]
+    user32.GetIconInfo.restype = wintypes.BOOL
+    ii = _ICONINFO()
+    if not user32.GetIconInfo(ci.hCursor, ctypes.byref(ii)):
+        return
+    # Icon dimensions come from the color bitmap (or mask if mono).
+    gdi32 = ctypes.windll.gdi32
+    gdi32.GetBitmapBits.argtypes = [ctypes.c_void_p, wintypes.DWORD,
+                                    ctypes.c_void_p]
+
+    class _BITMAP(ctypes.Structure):
+        _fields_ = [("bmType", ctypes.c_long), ("bmWidth", ctypes.c_long),
+                    ("bmHeight", ctypes.c_long), ("bmWidthBytes", ctypes.c_long),
+                    ("bmPlanes", wintypes.WORD), ("bmBitsPixel", wintypes.WORD),
+                    ("bmBits", ctypes.c_void_p)]
+    bm = _BITMAP()
+    src = ii.hbmColor if ii.hbmColor else ii.hbmMask
+    gdi32.GetObjectW.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                 ctypes.POINTER(_BITMAP)]
+    gdi32.GetObjectW(src, ctypes.sizeof(bm), ctypes.byref(bm))
+    iw, ih = int(bm.bmWidth), int(bm.bmHeight)
+    if iw <= 0 or ih <= 0:
+        iw, ih = 32, 32  # fallback
+    # Hotspot offset (where the click point is within the icon).
+    hx, hy = int(ii.xHotspot), int(ii.yHotspot)
+    # Clean up the bitmaps GetIconInfo created (caller must free them).
+    gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+    if ii.hbmMask:
+        gdi32.DeleteObject(ii.hbmMask)
+    if ii.hbmColor:
+        gdi32.DeleteObject(ii.hbmColor)
+    # Draw the icon scaled up, offset so the hotspot stays under the cursor.
+    user32.DrawIconEx.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                                  ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                                  wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+    user32.DrawIconEx.restype = wintypes.BOOL
+    draw_x = x - hx * scale
+    draw_y = y - hy * scale
+    user32.DrawIconEx(mdc, draw_x, draw_y, ci.hCursor,
+                      iw * scale, ih * scale, 0, None, 0x00000003)  # DI_NORMAL
+
+
 def _capture_screen_jpeg(quality: int = 55, max_w: int = 1280) -> bytes:
     """Capture the primary screen as a JPEG byte string (fast, in-process)."""
     _init_gdi()
@@ -577,6 +649,10 @@ def _capture_screen_jpeg(quality: int = 55, max_w: int = 1280) -> bytes:
     gdi32.SelectObject(mdc, hbmp)
     gdi32.BitBlt(mdc, 0, 0, sw, sh, hdc, 0, 0, 0x00CC0020)  # SRCCOPY
     user32.ReleaseDC(0, hdc)
+    # Draw the mouse cursor onto the capture. BitBlt copies the framebuffer
+    # but not the hardware cursor sprite, so the trackpad preview would show
+    # no cursor at all. We draw it 2x larger so it's easy to see on a phone.
+    _draw_cursor(mdc, scale=2)
     # GDI+ Bitmap from HBITMAP.
     gdi.GdipCreateBitmapFromHBITMAP.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
                                                 ctypes.POINTER(ctypes.c_void_p)]
@@ -717,11 +793,22 @@ def paste(text: str = ""):
 def ps(command: str = ""):
     if not command.strip():
         return {"error": "no command"}
+    # Enable ANSI color if running on PowerShell 7+ ($PSStyle only exists
+    # there). On Windows PowerShell 5.1 this is a no-op and formatting stays
+    # plain, which is fine — 5.1 never emitted ANSI anyway.
+    wrapped = (
+        "$ErrorActionPreference='Continue';"
+        "if (Get-Variable PSStyle -ErrorAction SilentlyContinue) {"
+        "  $PSStyle.OutputRendering='ANSI'"
+        "};"
+        f"& {{ {command} }}"
+    )
     try:
-        out = subprocess.run([POWERSHELL, "-NoProfile", "-Command", command],
+        out = subprocess.run([POWERSHELL, "-NoProfile", "-Command", wrapped],
                              capture_output=True, text=True, timeout=60,
                              **_SUBPROC_KWARGS)
-        return {"stdout": out.stdout, "stderr": out.stderr, "exit": out.returncode}
+        return {"stdout": out.stdout, "stderr": out.stderr, "exit": out.returncode,
+                "ansi": True}
     except subprocess.TimeoutExpired:
         return {"error": "timeout", "detail": "command exceeded 60s"}
     except Exception as exc:
@@ -732,11 +819,24 @@ def ps(command: str = ""):
 def wsl(command: str = ""):
     if not command.strip():
         return {"error": "no command"}
+    # Run under `script` with a pty so tools think they're attached to a
+    # terminal and emit ANSI color (ls --color, grep --color, etc.). The
+    # leading `export` ensures common tools default to color even without a
+    # pty. `script -qec` runs the command quietly and returns the raw stream.
+    inner = (
+        "export TERM=xterm-256color CLICOLOR_FORCE=1;"
+        f"{command}"
+    )
     try:
-        out = subprocess.run(["wsl", "--", "bash", "-lc", command],
+        out = subprocess.run(["wsl", "--", "bash", "-lc",
+                              f"script -qec {shlex.quote(inner)} /dev/null"],
                              capture_output=True, text=True, timeout=60,
                              **_SUBPROC_KWARGS)
-        return {"stdout": out.stdout, "stderr": out.stderr, "exit": out.returncode}
+        stdout = out.stdout
+        # `script` wraps output in \r\n; normalize to \n for display.
+        stdout = stdout.replace("\r\n", "\n").replace("\r", "\n")
+        return {"stdout": stdout, "stderr": out.stderr, "exit": out.returncode,
+                "ansi": True}
     except FileNotFoundError:
         return {"error": "wsl not installed"}
     except subprocess.TimeoutExpired:
@@ -930,6 +1030,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, list_commands())
         if route == "/stream":
             return self._serve_stream(query)
+        if route == "/ws":
+            return self._handle_ws(query)
         return self._run(route.lstrip("/"), query)
 
     def do_POST(self):
@@ -940,6 +1042,75 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = json.loads(self.rfile.read(length) or b"{}") if length else {}
         return self._run(route.lstrip("/"), query, body)
+
+    def _handle_ws(self, query: dict):
+        """Minimal WebSocket endpoint for low-latency mouse input.
+
+        The trackpad sends tiny JSON messages like {"m":"move","dx":3,"dy":-1}
+        over a single persistent connection, avoiding per-move HTTP overhead.
+        We apply them directly via the mouse_* helpers and never reply (the
+        client doesn't wait for a response), so latency is just network RTT.
+        """
+        if not self._authorized(query):
+            return
+        import hashlib
+        import base64
+        import struct
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        if not key:
+            self.send_response(400)
+            self.end_headers()
+            return
+        # RFC 6455 handshake: accept = base64(sha1(key + magic))
+        accept = base64.b64encode(
+            hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode())
+            .digest()).decode()
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.end_headers()
+        # Now we're in raw WebSocket frame mode on self.rfile/self.wfile.
+        rfile = self.rfile
+        wfile = self.wfile
+        try:
+            while True:
+                # Read a frame header (2 bytes min).
+                hdr = rfile.read(2)
+                if len(hdr) < 2:
+                    break
+                b0, b1 = hdr[0], hdr[1]
+                fin = b0 & 0x80
+                opcode = b0 & 0x0F
+                masked = b1 & 0x80
+                plen = b1 & 0x7F
+                if plen == 126:
+                    plen = struct.unpack("!H", rfile.read(2))[0]
+                elif plen == 127:
+                    plen = struct.unpack("!Q", rfile.read(8))[0]
+                mask = rfile.read(4) if masked else b""
+                payload = rfile.read(plen)
+                if masked:
+                    payload = bytes(payload[i] ^ mask[i % 4] for i in range(len(payload)))
+                if opcode == 0x8:  # close
+                    break
+                if opcode != 0x1:  # only handle text frames
+                    continue
+                try:
+                    msg = json.loads(payload.decode("utf-8"))
+                except Exception:
+                    continue
+                m = msg.get("m")
+                if m == "move":
+                    _mouse_move_relative(int(msg.get("dx", 0)), int(msg.get("dy", 0)))
+                elif m == "click":
+                    _mouse_click(msg.get("button", "left"))
+                elif m == "down":
+                    _mouse_button_down(msg.get("button", "left"))
+                elif m == "up":
+                    _mouse_button_up(msg.get("button", "left"))
+        except (OSError, ValueError, struct.error):
+            pass  # client disconnected
 
     def _serve_stream(self, query: dict):
         """Single-frame screen capture as JPEG. The trackpad polls this."""
@@ -1052,6 +1223,7 @@ class Handler(BaseHTTPRequestHandler):
         cards = "".join(primary) + tab_sections
         html = f"""<!doctype html><html><head><meta name="viewport"
         content="width=device-width,initial-scale=1"><title>PC Remote</title>
+        <meta charset="utf-8">
         <meta name="color-scheme" content="dark"><style>
         :root{{color-scheme:dark}}
         *{{box-sizing:border-box}}
@@ -1090,9 +1262,14 @@ class Handler(BaseHTTPRequestHandler):
         .bool-field{{gap:.5rem}}
         .out{{padding:.5rem .6rem;border-radius:6px;background:#0f1115;
         border:1px solid #2a2f3a;font-family:ui-monospace,monospace;
-        font-size:.8rem;white-space:pre-wrap;display:none;color:#a7f3d0}}
+        font-size:.8rem;white-space:pre-wrap;display:none;color:#a7f3d0;
+        overflow:auto;max-height:60vh}}
         .out.err{{color:#fca5a5}}
         .out.show{{display:block}}
+        .out .ansi-out{{color:#c8d3e0}}
+        .out .ansi-err{{color:#fca5a5}}
+        .out .ansi-exit{{color:#5b6473;margin-top:.3rem;font-size:.75rem;
+        border-top:1px solid #2a2f3a;padding-top:.3rem}}
         .confirm{{display:none;align-items:center;gap:.6rem;margin:.2rem .9rem .8rem;
         padding:.5rem .7rem;border-radius:8px;background:#2a1414;
         border:1px solid #5b2b2b;font-size:.85rem;color:#fca5a5}}
@@ -1220,6 +1397,10 @@ class Handler(BaseHTTPRequestHandler):
             out.appendChild(img);
           }} else if (data && data.result && 'text' in data.result) {{
             out.textContent = data.result.text || '(empty clipboard)';
+          }} else if (data && data.result && data.result.ansi) {{
+            // ANSI-colored console output (ps/wsl). Render to colored HTML.
+            out.innerHTML = ansiToHtml(data.result.stdout || '',
+              data.result.stderr || '', data.result.exit);
           }} else {{
             out.textContent = JSON.stringify(data, null, 2);
           }}
@@ -1229,6 +1410,83 @@ class Handler(BaseHTTPRequestHandler):
           const ch = card.querySelector('.chev'); if (ch) ch.classList.add('open');
           const u = card.querySelector('.undo');
           if (u && data && data.result && data.result.seconds > 0) u.classList.add('show');
+        }}
+        // Minimal ANSI SGR -> <span style="color"> converter. Handles the
+        // common 8/16-color codes plus 256-color and truecolor. Unknown SGR
+        // codes reset state. Returns escaped HTML.
+        const ANSI_COLORS = ['#000','#c00','#0a0','#a50','#00c','#c0c','#0aa','#ccc',
+          '#777','#f00','#0f0','#ff0','#00f','#f0f','#0ff','#fff'];
+        function ansiToHtml(stdout, stderr, exit) {{
+          const esc = s => s.replace(/[&<>]/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;'}})[c]);
+          // Build a 256-color palette (16 base + 216 cube + 24 grayscale).
+          if (!window._ANSI_256) {{
+            const p = ANSI_COLORS.slice();
+            for (let r=0;r<6;r++) for (let g=0;g<6;g++) for (let b=0;b<6;b++)
+              p.push('#' + [r,g,b].map(v => v?v*40+55:0).map(v => v.toString(16).padStart(2,'0')).join(''));
+            for (let v=8;v<248;v+=10) p.push('#' + [v,v,v].map(x => x.toString(16).padStart(2,'0')).join(''));
+            window._ANSI_256 = p;
+          }}
+          const ANSI_256 = window._ANSI_256;
+          const render = (text, defaultClass) => {{
+            let out = '', i = 0, open = false, cur = '';
+            const flush = () => {{ if (open) out += '</span>'; open = false; cur=''; }};
+            const setSpan = (style) => {{
+              flush();
+              out += '<span style="' + style + '">';
+              open = true;
+            }};
+            while (i < text.length) {{
+              if (text[i] === '\\x1b' && text[i+1] === '[') {{
+                // CSI sequence. Find the final byte (0x40-0x7E).
+                let j = i + 2;
+                while (j < text.length && (text.charCodeAt(j) < 0x40 || text.charCodeAt(j) > 0x7E)) j++;
+                if (j < text.length) {{
+                  const final = text[j];
+                  const params = text.slice(i+2, j);
+                  if (final === 'm') {{
+                    // SGR - color/style. Parse semicolon-separated codes.
+                    const codes = params.split(';').map(s => s === '' ? 0 : Number(s));
+                    let k = 0;
+                    while (k < codes.length) {{
+                      const c = codes[k];
+                      if (c === 0) {{ flush(); }}
+                      else if (c === 1) {{ setSpan((cur ? cur + ';' : '') + 'font-weight:bold'); cur=(cur||'')+'font-weight:bold'; }}
+                      else if (c === 3) {{ setSpan((cur ? cur + ';' : '') + 'font-style:italic'); cur=(cur||'')+'font-style:italic'; }}
+                      else if (c === 4) {{ setSpan((cur ? cur + ';' : '') + 'text-decoration:underline'); cur=(cur||'')+'text-decoration:underline'; }}
+                      else if (c === 22) {{ flush(); }}
+                      else if (c >= 30 && c <= 37) {{ setSpan('color:' + ANSI_COLORS[c-30]); cur='color:' + ANSI_COLORS[c-30]; }}
+                      else if (c === 38 && codes[k+1] === 5) {{ setSpan('color:' + ANSI_256[codes[k+2]||0]); k += 2; cur='color:' + ANSI_256[codes[k]||0]; }}
+                      else if (c === 38 && codes[k+1] === 2) {{ setSpan('color:rgb(' + (codes[k+2]||0) + ',' + (codes[k+3]||0) + ',' + (codes[k+4]||0) + ')'); k += 4; }}
+                      else if (c >= 40 && c <= 47) {{ setSpan('background:' + ANSI_COLORS[c-40]); cur='background:' + ANSI_COLORS[c-40]; }}
+                      else if (c === 39 || c === 49) {{ flush(); }}
+                      else if (c >= 90 && c <= 97) {{ setSpan('color:' + ANSI_COLORS[c-90+8]); cur='color:' + ANSI_COLORS[c-90+8]; }}
+                      k++;
+                    }}
+                  }}
+                  // Other CSI codes (K=erase line, J=erase screen, H=cursor
+                  // pos, etc.) are silently skipped - they don't affect text
+                  // styling and would corrupt the output if interpreted.
+                  i = j + 1;
+                  continue;
+                }}
+              }}
+              // Plain char.
+              if (!open) {{ out += '<span class="' + defaultClass + '">'; open = true; cur = defaultClass; }}
+              out += esc(text[i]);
+              i++;
+            }}
+            flush();
+            return out;
+          }};
+          let html = '';
+          if (stdout) html += render(stdout, 'ansi-out');
+          if (stderr) {{
+            if (stdout) html += '<hr style="border:0;border-top:1px solid #2a2f3a;margin:.3rem 0">';
+            html += render(stderr, 'ansi-err');
+          }}
+          if (exit !== undefined && exit !== null)
+            html += '<div class="ansi-exit">exit ' + exit + '</div>';
+          return html;
         }}
         // run() keeps at most ONE request in flight per card. If a new change
         // arrives while one is in flight, it is stashed as "pending" and sent
@@ -1247,7 +1505,10 @@ class Handler(BaseHTTPRequestHandler):
               if (isPing) {{
                 const ms = await measureLatency(cmd);
                 data = {{ result: {{ ms: ms }} }}; ok = true;
-                card.querySelector('.out').textContent = fmtMs(ms) + 'ms';
+                const out = card.querySelector('.out');
+                out.textContent = fmtMs(ms) + 'ms';
+                out.className = 'out show';
+                card.querySelector('.details').classList.add('open');
               }} else {{
                 const res = await fetch('/' + cmd + '?token=' + encodeURIComponent(TOKEN),
                   {{method:'POST', headers:{{'Content-Type':'application/json'}},
@@ -1299,6 +1560,7 @@ class Handler(BaseHTTPRequestHandler):
             const data = await res.json();
             out.textContent = JSON.stringify(data, null, 2);
             out.className = 'out show' + (res.ok ? '' : ' err');
+            if (res.ok) inp.value = '';
           }} catch (e) {{
             out.textContent = String(e); out.className = 'out show err';
           }}
@@ -1360,32 +1622,43 @@ class Handler(BaseHTTPRequestHandler):
         function toggleTrackpad(card) {{
           const tp = card.querySelector('.trackpad');
           const open = tp.classList.toggle('open');
-          if (open) startStream(card); else stopStream();
+          if (open) {{ wsConnect(); startStream(card); }} else stopStream();
         }}
         function startStream(card) {{
           tpStreamOn = true; tpImg = card.querySelector('.preview img');
           const badge = card.querySelector('.badge');
-          const fpsEl = card.getElementById('tp-fps');
+          const fpsEl = card.querySelector('#tp-fps');
           tpFpsT = performance.now(); tpFpsN = 0;
+          let lastUrl = null;
           const loop = async () => {{
             if (!tpStreamOn) return;
             const cb = document.querySelector('.card[data-cmd="trackpad"]');
             if (!cb || !cb.querySelector('.trackpad.open')) {{ tpStreamOn = false; return; }}
-            if (document.getElementById('tp-stream').checked) {{
+            if (card.querySelector('#tp-stream').checked) {{
               try {{
                 const r = await fetch('/stream?token=' + encodeURIComponent(TOKEN)
                   + '&q=50&w=1024', {{cache:'no-store'}});
                 if (r.ok) {{
                   const blob = await r.blob();
-                  tpImg.src = URL.createObjectURL(blob);
+                  if (lastUrl) URL.revokeObjectURL(lastUrl);
+                  lastUrl = URL.createObjectURL(blob);
+                  tpImg.src = lastUrl;
                   tpFpsN++;
                   const now = performance.now();
                   if (now - tpFpsT > 1000) {{
                     fpsEl.textContent = tpFpsN + ' fps';
                     tpFpsN = 0; tpFpsT = now;
                   }}
+                  badge.textContent = 'live';
+                  badge.style.background = 'rgba(34,197,94,.6)';
                 }}
-              }} catch (e) {{}}
+              }} catch (e) {{
+                badge.textContent = 'reconnecting…';
+                badge.style.background = 'rgba(220,38,38,.6)';
+              }}
+            }} else {{
+              badge.textContent = 'paused';
+              badge.style.background = 'rgba(91,100,115,.6)';
             }}
             if (tpStreamOn) requestAnimationFrame(loop);
           }};
@@ -1400,7 +1673,7 @@ class Handler(BaseHTTPRequestHandler):
           const pad = card.querySelector('.pad');
           if (pad.dataset.wired) return;
           pad.dataset.wired = '1';
-          const sens = () => parseFloat(document.getElementById('tp-sens').value);
+          const sens = () => parseFloat(card.querySelector('#tp-sens').value);
           pad.addEventListener('touchstart', e => {{
             if (e.touches.length !== 1) return;
             e.preventDefault();
@@ -1455,18 +1728,35 @@ class Handler(BaseHTTPRequestHandler):
             lastTap = now;
           }});
         }}
-        async function mouseCmd(cmd, body) {{
-          try {{
-            await fetch('/' + cmd + '?token=' + encodeURIComponent(TOKEN),
-              {{method:'POST', headers:{{'Content-Type':'application/json'}},
-               body: JSON.stringify(body)}});
-          }} catch (e) {{}}
+        // Low-latency mouse input over a single persistent WebSocket.
+        // Every move is a ~20-byte JSON frame with no HTTP overhead, so the
+        // cursor tracks the finger at network RTT (sub-millisecond on LAN)
+        // instead of HTTP round-trip (~20-30ms per move).
+        let ws = null, wsQueue = [];
+        function wsSend(msg) {{
+          if (ws && ws.readyState === 1) {{ ws.send(JSON.stringify(msg)); }}
+          else {{ wsQueue.push(msg); wsConnect(); }}
+        }}
+        function wsConnect() {{
+          if (ws && ws.readyState <= 1) return;  // connecting or open
+          const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+          ws = new WebSocket(proto + '//' + location.host + '/ws?token=' + encodeURIComponent(TOKEN));
+          ws.onopen = () => {{ while (wsQueue.length) ws.send(JSON.stringify(wsQueue.shift())); }};
+          ws.onclose = () => {{ ws = null; }};
+          ws.onerror = () => {{ ws = null; }};
+        }}
+        function mouseCmd(cmd, body) {{
+          // Map old HTTP command names to short WS messages.
+          if (cmd === 'mousemove') wsSend({{m:'move', dx:body.dx, dy:body.dy}});
+          else if (cmd === 'mouseclick') wsSend({{m:'click', button:body.button}});
+          else if (cmd === 'mousedrag' && body.action === 'down') wsSend({{m:'down', button:body.button||'left'}});
+          else if (cmd === 'mousedrag' && body.action === 'up') wsSend({{m:'up', button:body.button||'left'}});
         }}
         function mouseBtn(b) {{ mouseCmd('mouseclick', {{button:b}}); }}
         </script></body></html>"""
         body = html.encode("utf-8")
         self.send_response(200)
-        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -1532,15 +1822,16 @@ class Handler(BaseHTTPRequestHandler):
                        '<button onclick="mouseBtn(\'right\')">Right Click</button></div>'
                        '<div class="ctrls">'
                        '<label><input type="checkbox" id="tp-stream" checked> Stream</label>'
-                       '<label>Sensitivity <input type="range" id="tp-sens" min="0.5" '
-                       'max="3" step="0.1" value="1.5"></label>'
+                       '<label>Sensitivity <input type="range" id="tp-sens" min="3" '
+                       'max="18" step="0.6" value="9"></label>'
                        '<span class="fps" id="tp-fps">— fps</span>'
                        '</div>'
                        '<div class="out"></div></div>')
             chev = ""
             return (f'<div class="card" data-cmd="{name}" data-live="false">'
                     f'<div class="row" onclick="toggleTrackpad(this.closest(\'.card\'))">'
-                    f'<span class="name">{name}</span></div>{details}</div>')
+                    f'<span class="name">{name}</span>{chev}{ping_flag}'
+                    f'</div>{details}{confirm_box}{undo_box}</div>')
         details = f'<div class="details">{fields}<div class="out"></div></div>'
         live = "true" if meta.get("live") else "false"
         return (f'<div class="card" data-cmd="{name}" data-live="{live}"><div class="row" '
@@ -1566,4 +1857,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
