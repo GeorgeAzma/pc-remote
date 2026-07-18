@@ -2174,7 +2174,7 @@ class Handler(BaseHTTPRequestHandler):
         padding:.4rem .8rem;border-radius:6px;font-weight:600;cursor:pointer;
         font-size:.8rem}}
         </style></head>
-        <body><h1>PC</h1>{cards}
+        <body>{cards}
         <script>
         const TOKEN = {json.dumps(token)};
         function toggleDetails(card) {{
