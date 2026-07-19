@@ -1023,12 +1023,35 @@ MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP = 0x0010
+MOUSEEVENTF_WHEEL = 0x0800
+MOUSEEVENTF_HWHEEL = 0x1000
 MOUSEEVENTF_ABSOLUTE = 0x8000
+
+# One wheel notch = WHEEL_DELTA (120). Trackpad scroll is continuous, so we
+# scale finger pixels to a fraction of a notch — enough resolution to feel
+# smooth without spamming the app with thousands of micro-notches per swipe.
+_WHEEL_DELTA = 120
+_SCROLL_SCALE = 0.2
 
 
 def _mouse_move_relative(dx: int, dy: int):
     """Move the cursor by (dx, dy) pixels relative to its current position."""
     ctypes.windll.user32.mouse_event(MOUSEEVENTF_MOVE, int(dx), int(dy), 0, 0)
+
+
+def _mouse_scroll(dx: int, dy: int):
+    """Send vertical (dy) and horizontal (dx) wheel ticks. Positive dy scrolls
+    up, positive dx scrolls right — the client flips the sign for natural mode."""
+    if dy:
+        ticks = int(round(dy * _SCROLL_SCALE))
+        if ticks:
+            ctypes.windll.user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0,
+                                             ticks * _WHEEL_DELTA, 0)
+    if dx:
+        ticks = int(round(dx * _SCROLL_SCALE))
+        if ticks:
+            ctypes.windll.user32.mouse_event(MOUSEEVENTF_HWHEEL, 0, 0,
+                                             ticks * _WHEEL_DELTA, 0)
 
 
 def _mouse_click(button: str = "left"):
@@ -1759,6 +1782,8 @@ class Handler(BaseHTTPRequestHandler):
                 m = msg.get("m")
                 if m == "move":
                     _mouse_move_relative(int(msg.get("dx", 0)), int(msg.get("dy", 0)))
+                elif m == "scroll":
+                    _mouse_scroll(int(msg.get("dx", 0)), int(msg.get("dy", 0)))
                 elif m == "click":
                     _mouse_click(msg.get("button", "left"))
                 elif m == "down":
@@ -2654,13 +2679,25 @@ class Handler(BaseHTTPRequestHandler):
           pad.dataset.wired = '1';
           const sens = () => parseFloat(card.querySelector('#tp-sens').value);
           // Gesture scheme:
-          //   one-finger drag  = move cursor
-          //   one-finger tap   = left click
-          //   two-finger tap   = right click
-          //   two-finger drag  = left drag (hold button, move, release)
+          //   one-finger drag        = move cursor
+          //   one-finger tap         = left click
+          //   one-finger long-press  = begin left drag (hold button); the same
+          //                            finger then drags the object; lift to drop
+          //   two-finger tap         = right click
+          //   two-finger drag        = mouse wheel scroll (vertical + horizontal)
+          //
+          // Long-press uses a 250ms hold with <6px of movement; once armed, the
+          // finger's deltas are sent as cursor moves with the button held down.
+          // A long-press timer fires the 'down' so the drag starts the moment
+          // the threshold elapses — no need to move first to engage it.
+          const LONG_PRESS_MS = 250, LONG_PRESS_WIGGLE = 6;
           let touch = null;       // single-finger state
           let twoFinger = false;
           let twoStart = null;     // {{x, y, startX, startY, moved}}
+          let lpTimer = null, lpArmed = false;
+          function cancelLongPress() {{
+            if (lpTimer) {{ clearTimeout(lpTimer); lpTimer = null; }}
+          }}
           pad.addEventListener('touchstart', e => {{
             e.preventDefault();
             if (e.touches.length === 1) {{
@@ -2669,30 +2706,39 @@ class Handler(BaseHTTPRequestHandler):
                         startY:t.clientY, startTime:performance.now(),
                         moved:false}};
               twoFinger = false; twoStart = null;
+              lpArmed = false;
+              // Arm a long-press drag: if the finger stays put long enough,
+              // press the left button down so the next movement drags.
+              cancelLongPress();
+              lpTimer = setTimeout(() => {{
+                lpTimer = null;
+                if (touch && !touch.moved && !twoFinger) {{
+                  lpArmed = true;
+                  mouseCmd('mousedrag', {{action:'down', button:'left'}});
+                }}
+              }}, LONG_PRESS_MS);
             }} else if (e.touches.length === 2) {{
               twoFinger = true;
               touch = null;  // abandon single-finger gesture
+              cancelLongPress(); lpArmed = false;
               const t = e.touches[0];
               twoStart = {{x:t.clientX, y:t.clientY, startX:t.clientX,
-                           startY:t.clientY, moved:false, dragging:false}};
+                           startY:t.clientY, moved:false}};
             }}
           }}, {{passive:false}});
           pad.addEventListener('touchmove', e => {{
             e.preventDefault();
             if (twoFinger && twoStart) {{
+              // Two-finger drag = mouse wheel scroll. Vertical is primary;
+              // horizontal is sent too so wide pages pan naturally.
               const t = e.touches[0];
-              const dx = (t.clientX - twoStart.x) * sens();
-              const dy = (t.clientY - twoStart.y) * sens();
+              const dx = t.clientX - twoStart.x;
+              const dy = t.clientY - twoStart.y;
               if (Math.abs(t.clientX - twoStart.startX) > 6 ||
                   Math.abs(t.clientY - twoStart.startY) > 6)
                 twoStart.moved = true;
-              // On first significant move, press the left button down.
-              if (twoStart.moved && !twoStart.dragging) {{
-                mouseCmd('mousedrag', {{action:'down', button:'left'}});
-                twoStart.dragging = true;
-              }}
-              if (twoStart.dragging)
-                mouseCmd('mousemove', {{dx:Math.round(dx), dy:Math.round(dy)}});
+              if (dx || dy)
+                wsSend({{m:'scroll', dx:Math.round(dx), dy:Math.round(dy)}});
               twoStart.x = t.clientX;
               twoStart.y = t.clientY;
               return;
@@ -2701,9 +2747,12 @@ class Handler(BaseHTTPRequestHandler):
             const t = e.touches[0];
             const dx = (t.clientX - touch.x) * sens();
             const dy = (t.clientY - touch.y) * sens();
-            if (Math.abs(t.clientX - touch.startX) > 6 ||
-                Math.abs(t.clientY - touch.startY) > 6)
+            if (Math.abs(t.clientX - touch.startX) > LONG_PRESS_WIGGLE ||
+                Math.abs(t.clientY - touch.startY) > LONG_PRESS_WIGGLE) {{
               touch.moved = true;
+              // Any real movement cancels a pending long-press arming.
+              if (!lpArmed) cancelLongPress();
+            }}
             mouseCmd('mousemove', {{dx:Math.round(dx), dy:Math.round(dy)}});
             touch.x = t.clientX;
             touch.y = t.clientY;
@@ -2711,21 +2760,23 @@ class Handler(BaseHTTPRequestHandler):
           pad.addEventListener('touchend', e => {{
             if (twoFinger && twoStart) {{
               if (e.touches.length === 0) {{
-                if (twoStart.dragging) {{
-                  // Two-finger drag ended — release the left button.
-                  mouseCmd('mousedrag', {{action:'up', button:'left'}});
-                }} else if (!twoStart.moved) {{
+                if (!twoStart.moved)
                   // Two-finger tap — right click.
                   mouseCmd('mouseclick', {{button:'right'}});
-                }}
                 twoFinger = false; twoStart = null;
               }}
               return;
             }}
+            cancelLongPress();
             if (!touch) return;
             const dt = performance.now() - touch.startTime;
-            if (!touch.moved && dt < 300)
+            if (lpArmed) {{
+              // Long-press drag ended — release the left button.
+              mouseCmd('mousedrag', {{action:'up', button:'left'}});
+              lpArmed = false;
+            }} else if (!touch.moved && dt < 300) {{
               mouseCmd('mouseclick', {{button:'left'}});
+            }}
             touch = null;
           }});
           // Mouse events for desktop testing.
@@ -2748,6 +2799,7 @@ class Handler(BaseHTTPRequestHandler):
             mouseDown = false; mouseLast = null;
           }});
           pad.addEventListener('contextmenu', e => e.preventDefault());
+          wireWheel(pad);
         }}
         // Low-latency mouse input over a single persistent WebSocket.
         // Every move is a ~20-byte JSON frame with no HTTP overhead, so the
@@ -2772,6 +2824,16 @@ class Handler(BaseHTTPRequestHandler):
           else if (cmd === 'mouseclick') wsSend({{m:'click', button:body.button}});
           else if (cmd === 'mousedrag' && body.action === 'down') wsSend({{m:'down', button:body.button||'left'}});
           else if (cmd === 'mousedrag' && body.action === 'up') wsSend({{m:'up', button:body.button||'left'}});
+        }}
+        // Desktop testing: mouse wheel over the pad scrolls too.
+        function wireWheel(pad) {{
+          if (pad.dataset.wheelWired) return;
+          pad.dataset.wheelWired = '1';
+          pad.addEventListener('wheel', e => {{
+            e.preventDefault();
+            wsSend({{m:'scroll', dx:Math.round(e.deltaX),
+                     dy:Math.round(e.deltaY)}});
+          }}, {{passive:false}});
         }}
         function mouseBtn(b) {{ mouseCmd('mouseclick', {{button:b}}); }}
         // --- Keyboard: type text / send special keys to the focused window ---
