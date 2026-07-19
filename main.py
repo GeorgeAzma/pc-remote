@@ -907,10 +907,8 @@ class _ScreenStreamer:
     """
 
     def __init__(self):
-        self._prev_sample = b""
+        self._prev_hash = None
         self._prev_cursor = (-1, -1)
-        self._buf = None
-        self._sample_stride = 8192  # bytes between sampled pixels for change detect
         # Reused GDI handles across frames — recreating a DC + bitmap every
         # frame is ~1-2ms of pure handle churn that adds up at 60fps. We
         # recreate only when the output size changes (e.g. zoom toggle).
@@ -918,9 +916,47 @@ class _ScreenStreamer:
         self._hbmp = None
         self._out_w = 0
         self._out_h = 0
+        # Coarse thumbnail for change detection. We StretchBlt the output
+        # frame down to 32x18 and hash it — a uniform spatial sample that
+        # catches localized changes (video playback, toasts, notifications,
+        # blinking cursors) anywhere on screen, unlike a fixed-stride sample
+        # which systematically misses whatever falls between sampled pixels.
+        # 32x18x4 = 2304 bytes; hashing that is ~microseconds, and the
+        # downscale is GPU-assisted via StretchBlt so it's cheap.
+        self._thumb_w = 32
+        self._thumb_h = 18
+        self._thumb_dc = None
+        self._thumb_bmp = None
+        self._thumb_buf = None
+
+    def reset(self):
+        """Release cached GDI handles so the next get_frame rebuilds them.
+        Called by the capture loop after a transient GDI failure (screen
+        lock, display sleep, DPI change) — stale handles can keep failing,
+        so we drop them and let _ensure_buffer recreate from scratch."""
+        if self._mdc is not None:
+            if self._hbmp:
+                try: _gdi32.DeleteObject(self._hbmp)
+                except Exception: pass
+            try: _gdi32.DeleteDC(self._mdc)
+            except Exception: pass
+        if self._thumb_dc is not None:
+            if self._thumb_bmp:
+                try: _gdi32.DeleteObject(self._thumb_bmp)
+                except Exception: pass
+            try: _gdi32.DeleteDC(self._thumb_dc)
+            except Exception: pass
+        self._mdc = None
+        self._hbmp = None
+        self._out_w = 0
+        self._out_h = 0
+        self._thumb_dc = None
+        self._thumb_bmp = None
+        self._thumb_buf = None
 
     def _ensure_buffer(self, hdc, out_w, out_h):
-        """Lazily create (or resize) the reusable output DC + bitmap."""
+        """Lazily create (or resize) the reusable output DC + bitmap, and the
+        thumbnail DC used for change detection."""
         if (self._mdc is not None and self._out_w == out_w
                 and self._out_h == out_h):
             return
@@ -932,6 +968,16 @@ class _ScreenStreamer:
         self._hbmp = _gdi32.CreateCompatibleBitmap(hdc, out_w, out_h)
         _gdi32.SelectObject(self._mdc, self._hbmp)
         self._out_w, self._out_h = out_w, out_h
+        # (Re)create the thumbnail DC + bitmap too.
+        if self._thumb_dc is not None:
+            if self._thumb_bmp:
+                _gdi32.DeleteObject(self._thumb_bmp)
+            _gdi32.DeleteDC(self._thumb_dc)
+        self._thumb_dc = _gdi32.CreateCompatibleDC(hdc)
+        self._thumb_bmp = _gdi32.CreateCompatibleBitmap(
+            hdc, self._thumb_w, self._thumb_h)
+        _gdi32.SelectObject(self._thumb_dc, self._thumb_bmp)
+        self._thumb_buf = (ctypes.c_ubyte * (self._thumb_w * self._thumb_h * 4))()
 
     def get_frame(self, quality=50, max_w=1280, zoom=1, _want_change_info=False):
         """Return JPEG bytes if the screen changed, or None if unchanged.
@@ -951,9 +997,10 @@ class _ScreenStreamer:
 
         Change detection is cursor-first: a moved cursor means we always
         re-encode (the cursor sprite is part of the frame). Only when the
-        cursor is also still do we fall back to a sparse pixel sample to
-        catch screen changes the cursor didn't accompany. This skips the
-        expensive GetDIBits on the hot path (cursor moving).
+        cursor is also still and no input is recent do we hash a coarse
+        32x18 thumbnail to catch spontaneous screen changes (video, toasts)
+        the cursor didn't accompany. This skips the change hash on the hot
+        path (cursor moving / input recent).
 
         When _want_change_info is true, returns (jpeg_or_None, cursor_moved)
         so the caller can reset its static-streak counter on cursor-only
@@ -970,6 +1017,12 @@ class _ScreenStreamer:
         _user32.GetCursorPos(ctypes.byref(pt))
         cursor_pos = (pt.x, pt.y)
         cursor_moved = (cursor_pos != self._prev_cursor)
+        # Input-aware change detection: if any mouse/keyboard input happened
+        # in the last 150ms, always re-encode. This catches scrolling (wheel
+        # events shift page content but the cursor stays put) and clicks that
+        # toggle UI without the cursor crossing sampled pixels — both of which
+        # the coarse thumbnail hash could still miss if the change is tiny.
+        input_recent = (time.monotonic() - _last_input_at) < 0.15
         # Compute the capture region. In zoom mode this is a sub-rect of
         # the screen centered on the cursor; otherwise it's the full screen.
         if zoom > 1:
@@ -1004,40 +1057,60 @@ class _ScreenStreamer:
                               crop_x, crop_y, crop_w, crop_h, 0x00CC0020)
         _user32.ReleaseDC(0, hdc)
         # Change detection. Cursor-first: if the cursor moved, we always
-        # re-encode (skip the expensive GetDIBits). Only when the cursor is
-        # also still do we sample pixels to catch screen changes the cursor
-        # didn't accompany. The sample is taken BEFORE drawing the cursor
-        # sprite so the sprite's anti-aliasing doesn't cause false positives.
-        if cursor_moved:
+        # re-encode (skip the change hash). Also re-encode if any input
+        # happened recently (scroll/click/drag) since that likely changed
+        # the screen without moving the cursor. Only when neither is true
+        # do we hash a coarse 32x18 thumbnail to catch spontaneous screen
+        # changes (video playback, toasts, notifications, animations). The
+        # hash is taken BEFORE drawing the cursor sprite so the sprite's
+        # anti-aliasing doesn't cause false positives. A uniform downscale
+        # catches localized changes anywhere on screen — a fixed-stride
+        # sparse sample systematically misses whatever falls between the
+        # sampled pixels, which is why scrolling a page could freeze the
+        # stream even when content was clearly shifting.
+        if cursor_moved or input_recent:
             changed = True
         else:
+            tdc, tbmp = self._thumb_dc, self._thumb_bmp
+            _gdi32.SetStretchBltMode(tdc, 3)  # HALFTONE
+            _gdi32.StretchBlt(tdc, 0, 0, self._thumb_w, self._thumb_h,
+                              mdc, 0, 0, out_w, out_h, 0x00CC0020)
             bi = _BITMAPINFOHEADER()
             bi.biSize = ctypes.sizeof(bi)
-            bi.biWidth = out_w
-            bi.biHeight = out_h
+            bi.biWidth = self._thumb_w
+            bi.biHeight = self._thumb_h
             bi.biPlanes = 1
             bi.biBitCount = 32
             bi.biCompression = 0  # BI_RGB
-            buf_size = out_w * out_h * 4
-            if self._buf is None or len(self._buf) < buf_size:
-                self._buf = (ctypes.c_ubyte * buf_size)()
-            _gdi32.GetDIBits(mdc, hbmp, 0, out_h, self._buf, ctypes.byref(bi), 0)
-            sample = bytes(self._buf[::self._sample_stride])
-            changed = (sample != self._prev_sample)
-            self._prev_sample = sample
+            _gdi32.GetDIBits(tdc, tbmp, 0, self._thumb_h, self._thumb_buf,
+                            ctypes.byref(bi), 0)
+            h = hash(bytes(self._thumb_buf))
+            changed = (h != self._prev_hash)
+            self._prev_hash = h
         self._prev_cursor = cursor_pos
         if not changed:
             return (None, cursor_moved) if _want_change_info else None
         # Draw the cursor onto the (already downscaled) output bitmap. The
-        # cursor's screen position is translated into output-local coords and
-        # scaled by the downscale factor so it lands in the right spot at a
-        # sensible size. In zoom mode the crop is already magnified, so we
-        # use scale=1 there; otherwise scale=2 makes it easy to see on a phone.
+        # cursor's screen position must be translated into the OUTPUT bitmap's
+        # coordinate space (not the crop's), so we scale by the downscale
+        # factor in BOTH zoom and non-zoom mode. The old code drew the cursor
+        # before downscaling, so crop-local coords were correct then; now the
+        # cursor is drawn after the downscale, so we must apply scale_x/scale_y
+        # here too or the cursor lands in the wrong spot whenever out_w !=
+        # crop_w (which is the common case in zoom mode and any time max_w
+        # downscales the frame).
         scale_x = out_w / crop_w
         scale_y = out_h / crop_h
         if zoom > 1:
-            _draw_cursor_at(mdc, (cursor_pos[0] - crop_x),
-                            (cursor_pos[1] - crop_y), scale=1)
+            # Zoom mode: the crop is already a magnified region of the screen,
+            # and the output further downscales it to max_w. Translate the
+            # cursor's screen position into crop-local coords, then into
+            # output-local coords. Use scale=1 for the icon sprite because the
+            # crop is already magnified — scaling the icon up again would make
+            # it enormous relative to the (further-downscaled) output.
+            lx = (cursor_pos[0] - crop_x) * scale_x
+            ly = (cursor_pos[1] - crop_y) * scale_y
+            _draw_cursor_at(mdc, int(lx), int(ly), scale=1)
         else:
             # Translate the screen-space cursor into the downscaled bitmap's
             # coordinate space and draw it 2x the downscale factor so it
@@ -1072,30 +1145,61 @@ MOUSEEVENTF_HWHEEL = 0x1000
 MOUSEEVENTF_ABSOLUTE = 0x8000
 
 # One wheel notch = WHEEL_DELTA (120). Trackpad scroll is continuous, so we
-# scale finger pixels to a fraction of a notch — enough resolution to feel
-# smooth without spamming the app with thousands of micro-notches per swipe.
+# scale finger pixels to a fraction of a notch and ACCUMULATE the remainder
+# across calls. Rounding each call to an integer notch drops small movements
+# entirely (you have to move a lot before a single notch fires, then it jumps)
+# — accumulation sends the fractional carry as part of the next wheel event,
+# so modern apps (browsers, editors) scroll smoothly at sub-notch resolution.
 _WHEEL_DELTA = 120
-_SCROLL_SCALE = 0.2
+_SCROLL_SCALE = 4.0
+_scroll_carry = [0.0, 0.0]  # [vertical, horizontal] fractional wheel units
+
+# Timestamp of the most recent mouse/keyboard input, so the screen streamer
+# can treat "input just happened" as "screen probably changed". This catches
+# events that change the screen without moving the cursor — most notably
+# scrolling (wheel events shift page content but the cursor stays put), but
+# also clicks/drags that toggle UI without the cursor crossing pixels the
+# sparse change-detector samples. Without this, scrolling a page can leave
+# the stream frozen until you move the cursor.
+_last_input_at = 0.0
+
+
+def _mark_input():
+    global _last_input_at
+    _last_input_at = time.monotonic()
 
 
 def _mouse_move_relative(dx: int, dy: int):
     """Move the cursor by (dx, dy) pixels relative to its current position."""
     ctypes.windll.user32.mouse_event(MOUSEEVENTF_MOVE, int(dx), int(dy), 0, 0)
+    _mark_input()
 
 
 def _mouse_scroll(dx: int, dy: int):
-    """Send vertical (dy) and horizontal (dx) wheel ticks. Positive dy scrolls
-    up, positive dx scrolls right — the client flips the sign for natural mode."""
-    if dy:
-        ticks = int(round(dy * _SCROLL_SCALE))
-        if ticks:
-            ctypes.windll.user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0,
-                                             ticks * _WHEEL_DELTA, 0)
-    if dx:
-        ticks = int(round(dx * _SCROLL_SCALE))
-        if ticks:
-            ctypes.windll.user32.mouse_event(MOUSEEVENTF_HWHEEL, 0, 0,
-                                             ticks * _WHEEL_DELTA, 0)
+    """Send vertical (dy) and horizontal (dx) wheel units. Positive dy scrolls
+    up, positive dx scrolls right — the client flips the sign for natural mode.
+
+    Fractional wheel units are accumulated across calls and emitted as integer
+    wheel deltas (in units of 1, not WHEEL_DELTA=120) so modern apps that read
+    wheelDelta as a continuous value (browsers, editors, Office) scroll
+    smoothly at sub-notch resolution. Legacy apps that only react to full
+    WHEEL_DELTA multiples still work — they just round internally."""
+    global _scroll_carry
+    # Scale finger pixels to wheel units (1 unit ≈ 1/120 of a notch), then
+    # accumulate the fractional part so small slow scrolls add up instead of
+    # being silently dropped by int() truncation.
+    _scroll_carry[0] += dy * _SCROLL_SCALE
+    _scroll_carry[1] += dx * _SCROLL_SCALE
+    v = int(_scroll_carry[0])
+    h = int(_scroll_carry[1])
+    _scroll_carry[0] -= v
+    _scroll_carry[1] -= h
+    if v:
+        ctypes.windll.user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, v, 0)
+    if h:
+        ctypes.windll.user32.mouse_event(MOUSEEVENTF_HWHEEL, 0, 0, h, 0)
+    if v or h:
+        _mark_input()
 
 
 def _mouse_click(button: str = "left"):
@@ -1105,16 +1209,19 @@ def _mouse_click(button: str = "left"):
     else:
         ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
         ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    _mark_input()
 
 
 def _mouse_button_down(button: str = "left"):
     flag = MOUSEEVENTF_RIGHTDOWN if button == "right" else MOUSEEVENTF_LEFTDOWN
     ctypes.windll.user32.mouse_event(flag, 0, 0, 0, 0)
+    _mark_input()
 
 
 def _mouse_button_up(button: str = "left"):
     flag = MOUSEEVENTF_RIGHTUP if button == "right" else MOUSEEVENTF_LEFTUP
     ctypes.windll.user32.mouse_event(flag, 0, 0, 0, 0)
+    _mark_input()
 
 
 @command("mousemove", "Move the mouse cursor by a relative delta (dx, dy).", hide=True)
@@ -1991,13 +2098,51 @@ class Handler(BaseHTTPRequestHandler):
             static_streak = 0
             static_threshold = 120    # ~2s at 60fps before backing off
             next_frame = time.monotonic()
+            # Error backoff: if get_frame throws (screen lock, display sleep,
+            # DPI change, transient GDI failure), we must NOT let the
+            # exception kill the capture thread — a dead thread leaves the
+            # vstream socket half-open, the browser never fires onclose, and
+            # the stream silently dies forever. Instead, back off briefly
+            # and retry; after repeated failures, close the socket cleanly
+            # so the browser's onclose fires and it reconnects.
+            err_streak = 0
+            ERR_BACKOFF = 0.1
+            ERR_FATAL = 30  # ~3s of continuous failures -> give up this socket
             while not stop.is_set():
                 if paused[0]:
                     time.sleep(0.1)
                     next_frame = time.monotonic() + frame_budget
                     continue
-                frame, cursor_moved = streamer.get_frame(
-                    quality[0], max_w[0], zoom[0], _want_change_info=True)
+                try:
+                    frame, cursor_moved = streamer.get_frame(
+                        quality[0], max_w[0], zoom[0], _want_change_info=True)
+                except Exception:
+                    # GDI/transient failure — back off and retry rather than
+                    # killing the thread. Reset the streamer's GDI handles so
+                    # the next attempt rebuilds them from scratch.
+                    err_streak += 1
+                    if err_streak >= ERR_FATAL:
+                        try:
+                            # Send a proper WS close frame with status 1011
+                            # (internal error) so the client fires onclose and
+                            # reconnects, rather than leaving the socket
+                            # half-open. A 2-byte status body is per RFC 6455
+                            # §5.5.1; an empty close is allowed but some
+                            # clients reject it.
+                            import struct as _s
+                            self._ws_write_frame(
+                                self.wfile,
+                                _s.pack("!H", 1011),
+                                opcode=0x8)
+                        except Exception:
+                            pass
+                        stop.set()
+                        break
+                    streamer.reset()
+                    time.sleep(ERR_BACKOFF)
+                    next_frame = time.monotonic() + frame_budget
+                    continue
+                err_streak = 0
                 if frame is not None:
                     try:
                         self._ws_write_frame(self.wfile, frame, opcode=0x2)
@@ -2744,12 +2889,17 @@ class Handler(BaseHTTPRequestHandler):
           // control (precise cursor placement) while the high end ramps up
           // fast for crossing the screen in one swipe. A linear slider forces
           // you to trade off precision vs speed; the curve gives both.
-          // Output range is ~0.3x (slider=0) to ~2.6x (slider=100), with the
-          // default (55) landing around ~1.0x — i.e. roughly the old default
-          // but with ~35% more headroom at the top than before.
+          //
+          // The old code used the raw slider value (default 13.5) as a direct
+          // multiplier on finger deltas, so the default feel was ~13.5x. We
+          // preserve that feel at the default and add ~35% headroom: the curve
+          // outputs ~2x at slider=0 (fine), ~18x at the default (55), and
+          // ~36x at slider=100 (flick across the screen). The quadratic shape
+          // means the low end is gentle for precision and the high end ramps
+          // fast for speed.
           const sens = () => {{
             const v = parseFloat(card.querySelector('#tp-sens').value) / 100;
-            return 0.3 + 2.3 * v * v;
+            return 2 + 34 * v * v;
           }};
           // Gesture scheme (identical on the pad and the live preview):
           //   one-finger drag        = move cursor
@@ -2898,22 +3048,26 @@ class Handler(BaseHTTPRequestHandler):
         // instead of HTTP round-trip (~20-30ms per move).
         //
         // If the socket drops mid-session, queued move/scroll deltas are
-        // collapsed to their newest values on reconnect so the cursor
-        // resumes from where the finger is now instead of replaying a
-        // backlog and snapping.
+        // SUMMED on reconnect (they're relative deltas, so the cumulative
+        // movement must be preserved — taking only the last one would lose
+        // all intermediate movement and leave the cursor behind the finger).
+        // Non-delta messages (clicks, button down/up) are kept as-is.
         let ws = null, wsQueue = [];
         function _wsFlushQueue() {{
-          // Collapse queued move/scroll deltas into their newest values so a
-          // reconnect doesn't replay a backlog and snap the cursor.
-          let lastMove = null, lastScroll = null;
+          // Sum queued move/scroll deltas (they're relative) and emit them
+          // as a single message each, so a reconnect doesn't replay a
+          // backlog of tiny frames but also doesn't lose the cumulative
+          // movement. Non-delta messages (clicks, button events) are kept.
+          let moveDx = 0, moveDy = 0, haveMove = false;
+          let scrollDx = 0, scrollDy = 0, haveScroll = false;
           const out = [];
           for (const m of wsQueue) {{
-            if (m.m === 'move') lastMove = m;
-            else if (m.m === 'scroll') lastScroll = m;
+            if (m.m === 'move') {{ moveDx += m.dx|0; moveDy += m.dy|0; haveMove = true; }}
+            else if (m.m === 'scroll') {{ scrollDx += m.dx|0; scrollDy += m.dy|0; haveScroll = true; }}
             else out.push(m);
           }}
-          if (lastScroll) out.push(lastScroll);
-          if (lastMove) out.push(lastMove);
+          if (haveScroll) out.push({{m:'scroll', dx:scrollDx, dy:scrollDy}});
+          if (haveMove) out.push({{m:'move', dx:moveDx, dy:moveDy}});
           wsQueue = out;
           while (wsQueue.length) ws.send(JSON.stringify(wsQueue.shift()));
         }}
@@ -3234,8 +3388,32 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    def handle_error(self, *args, **kwargs):
+        # Override BaseServer.handle_error so a single bad request (e.g. a
+        # malformed WebSocket frame, a broken pipe when the phone disconnects
+        # mid-transfer) doesn't print a traceback and can't propagate out and
+        # kill the server thread in a way that leaves the port wedged. We
+        # swallow the exception — the per-connection thread just ends, and
+        # the server keeps serving other connections.
+        import traceback
+        try:
+            exc = args[0] if args else None
+            if isinstance(exc, (BrokenPipeError, ConnectionResetError,
+                               ConnectionAbortedError, OSError)):
+                return  # client went away — normal, nothing to do
+        except Exception:
+            pass
+        # Unexpected error: log it but don't crash the server.
+        traceback.print_exc()
+
 
 def main():
+    # daemon_threads: handler threads are daemons so a hung connection
+    # (e.g. a capture loop stuck on a dead socket) can't keep the process
+    # alive and block a restart. allow_reuse_address: a crashed server can
+    # rebind the port immediately instead of waiting out TIME_WAIT.
+    ThreadingHTTPServer.daemon_threads = True
+    ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"Server listening on http://{HOST}:{PORT}")
     if not TOKEN:
