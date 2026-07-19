@@ -2629,23 +2629,6 @@ class Handler(BaseHTTPRequestHandler):
               tpFpsN = 0; tpFpsT = now;
             }}
           }};
-          // Double-tap the preview to toggle 2x zoom (cursor-following crop).
-          // In zoom mode the server crops a half-screen region around the
-          // mouse and scales it to the same output width, so each pixel is
-          // twice as detailed — much sharper text without bigger payloads.
-          let lastTap = 0, zoomed = false;
-          tpImg.addEventListener('touchend', e => {{
-            const now = performance.now();
-            if (now - lastTap < 300) {{
-              e.preventDefault();
-              zoomed = !zoomed;
-              if (sw.readyState === 1)
-                sw.send(JSON.stringify({{m:'set', z: zoomed ? 3 : 1}}));
-              tpImg.style.outline = zoomed ? '3px solid #22c55e' : '';
-              badge.textContent = zoomed ? '3x' : 'live';
-            }}
-            lastTap = now;
-          }}, {{passive:false}});
           // Wire up the stream checkbox (pause/resume via control message).
           // Uses card._streamWs (the live socket) rather than the captured
           // `sw` closure, so pause/resume still works after the stream
@@ -2662,7 +2645,21 @@ class Handler(BaseHTTPRequestHandler):
                 ? 'rgba(34,197,94,.6)' : 'rgba(91,100,115,.6)';
             }});
           }}
-          wirePad(card);
+          // The live preview doubles as a trackpad surface with the exact same
+          // gestures as the pad below; double-tap toggles 2x zoom
+          // (cursor-following crop). A single tap waits ~300ms for a second
+          // tap so a double-tap can cancel the click and zoom instead. Uses
+          // card._streamWs so the toggle still targets the right socket after
+          // the stream auto-reconnects with a new WebSocket instance.
+          wirePad(tpImg, () => {{
+            tpImg._zoomed = !tpImg._zoomed;
+            const sock = card._streamWs;
+            if (sock && sock.readyState === 1)
+              sock.send(JSON.stringify({{m:'set', z: tpImg._zoomed ? 3 : 1}}));
+            tpImg.style.outline = tpImg._zoomed ? '3px solid #22c55e' : '';
+            badge.textContent = tpImg._zoomed ? '3x' : 'live';
+          }});
+          wirePad(card.querySelector('.pad'), null);
         }}
         function stopStream() {{
           tpStreamOn = false;
@@ -2673,32 +2670,50 @@ class Handler(BaseHTTPRequestHandler):
           }}
           if (tpImg) tpImg.src = '';
         }}
-        function wirePad(card) {{
-          const pad = card.querySelector('.pad');
-          if (pad.dataset.wired) return;
-          pad.dataset.wired = '1';
+        function wirePad(el, onDoubleTap) {{
+          if (el.dataset.wired) return;
+          el.dataset.wired = '1';
+          const card = el.closest('.card');
           const sens = () => parseFloat(card.querySelector('#tp-sens').value);
-          // Gesture scheme:
+          // Gesture scheme (identical on the pad and the live preview):
           //   one-finger drag        = move cursor
           //   one-finger tap         = left click
           //   one-finger long-press  = begin left drag (hold button); the same
           //                            finger then drags the object; lift to drop
           //   two-finger tap         = right click
           //   two-finger drag        = mouse wheel scroll (vertical + horizontal)
+          //   double-tap             = optional onDoubleTap() (e.g. preview zoom)
           //
           // Long-press uses a 250ms hold with <6px of movement; once armed, the
           // finger's deltas are sent as cursor moves with the button held down.
           // A long-press timer fires the 'down' so the drag starts the moment
           // the threshold elapses — no need to move first to engage it.
-          const LONG_PRESS_MS = 250, LONG_PRESS_WIGGLE = 6;
+          // When onDoubleTap is set, a single tap waits ~300ms for a second tap
+          // so a double-tap can cancel the click and fire the callback instead.
+          const LONG_PRESS_MS = 250, LONG_PRESS_WIGGLE = 6, DBL_TAP_MS = 300;
           let touch = null;       // single-finger state
           let twoFinger = false;
           let twoStart = null;     // {{x, y, startX, startY, moved}}
           let lpTimer = null, lpArmed = false;
+          let lastTap = 0, clickTimer = null;
           function cancelLongPress() {{
             if (lpTimer) {{ clearTimeout(lpTimer); lpTimer = null; }}
           }}
-          pad.addEventListener('touchstart', e => {{
+          function fireClick() {{ mouseCmd('mouseclick', {{button:'left'}}); }}
+          function handleTap() {{
+            const now = performance.now();
+            if (onDoubleTap && now - lastTap < DBL_TAP_MS) {{
+              if (clickTimer) {{ clearTimeout(clickTimer); clickTimer = null; }}
+              onDoubleTap();
+              lastTap = 0;
+            }} else {{
+              lastTap = now;
+              if (onDoubleTap)
+                clickTimer = setTimeout(() => {{ clickTimer = null; fireClick(); }}, DBL_TAP_MS);
+              else fireClick();
+            }}
+          }}
+          el.addEventListener('touchstart', e => {{
             e.preventDefault();
             if (e.touches.length === 1) {{
               const t = e.touches[0];
@@ -2726,7 +2741,7 @@ class Handler(BaseHTTPRequestHandler):
                            startY:t.clientY, moved:false}};
             }}
           }}, {{passive:false}});
-          pad.addEventListener('touchmove', e => {{
+          el.addEventListener('touchmove', e => {{
             e.preventDefault();
             if (twoFinger && twoStart) {{
               // Two-finger drag = mouse wheel scroll. Vertical is primary;
@@ -2757,7 +2772,7 @@ class Handler(BaseHTTPRequestHandler):
             touch.x = t.clientX;
             touch.y = t.clientY;
           }}, {{passive:false}});
-          pad.addEventListener('touchend', e => {{
+          el.addEventListener('touchend', e => {{
             if (twoFinger && twoStart) {{
               if (e.touches.length === 0) {{
                 if (!twoStart.moved)
@@ -2775,31 +2790,31 @@ class Handler(BaseHTTPRequestHandler):
               mouseCmd('mousedrag', {{action:'up', button:'left'}});
               lpArmed = false;
             }} else if (!touch.moved && dt < 300) {{
-              mouseCmd('mouseclick', {{button:'left'}});
+              handleTap();
             }}
             touch = null;
           }});
           // Mouse events for desktop testing.
           let mouseDown = false, mouseLast = null;
-          pad.addEventListener('mousedown', e => {{
+          el.addEventListener('mousedown', e => {{
             mouseDown = true;
             mouseLast = {{x:e.clientX, y:e.clientY}};
           }});
-          pad.addEventListener('mousemove', e => {{
+          el.addEventListener('mousemove', e => {{
             if (!mouseDown || !mouseLast) return;
             const dx = (e.clientX - mouseLast.x) * sens();
             const dy = (e.clientY - mouseLast.y) * sens();
             mouseCmd('mousemove', {{dx:Math.round(dx), dy:Math.round(dy)}});
             mouseLast = {{x:e.clientX, y:e.clientY}};
           }});
-          pad.addEventListener('mouseup', e => {{
+          el.addEventListener('mouseup', e => {{
             if (!mouseDown) return;
             if (e.button === 2) mouseCmd('mouseclick', {{button:'right'}});
-            else if (e.button === 0) mouseCmd('mouseclick', {{button:'left'}});
+            else if (e.button === 0) handleTap();
             mouseDown = false; mouseLast = null;
           }});
-          pad.addEventListener('contextmenu', e => e.preventDefault());
-          wireWheel(pad);
+          el.addEventListener('contextmenu', e => e.preventDefault());
+          wireWheel(el);
         }}
         // Low-latency mouse input over a single persistent WebSocket.
         // Every move is a ~20-byte JSON frame with no HTTP overhead, so the
