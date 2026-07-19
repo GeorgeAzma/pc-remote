@@ -1151,7 +1151,7 @@ MOUSEEVENTF_ABSOLUTE = 0x8000
 # — accumulation sends the fractional carry as part of the next wheel event,
 # so modern apps (browsers, editors) scroll smoothly at sub-notch resolution.
 _WHEEL_DELTA = 120
-_SCROLL_SCALE = 4.0
+_SCROLL_SCALE = 6.0
 _scroll_carry = [0.0, 0.0]  # [vertical, horizontal] fractional wheel units
 
 # Timestamp of the most recent mouse/keyboard input, so the screen streamer
