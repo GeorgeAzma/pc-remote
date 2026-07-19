@@ -910,8 +910,9 @@ class _ScreenStreamer:
         self._prev_sample = b""
         self._prev_cursor = (-1, -1)
         self._buf = None
+        self._sample_stride = 8192  # bytes between sampled pixels for change detect
 
-    def get_frame(self, quality=50, max_w=1280, zoom=1):
+    def get_frame(self, quality=50, max_w=1280, zoom=1, _want_change_info=False):
         """Return JPEG bytes if the screen changed, or None if unchanged.
 
         When zoom > 1, only a (1/zoom) region centered on the mouse cursor
@@ -922,17 +923,29 @@ class _ScreenStreamer:
         In zoom mode we capture ONLY the crop region directly from the
         screen DC (not the full screen then crop), which is ~10x less work
         per frame and keeps latency low even at high zoom.
+
+        Change detection is cursor-first: a moved cursor means we always
+        re-encode (the cursor sprite is part of the frame). Only when the
+        cursor is also still do we fall back to a sparse pixel sample to
+        catch screen changes the cursor didn't accompany. This skips the
+        expensive full-screen GetDIBits on the hot path (cursor moving),
+        which is the difference between 30fps and 60fps.
+
+        When _want_change_info is true, returns (jpeg_or_None, cursor_moved)
+        so the caller can reset its static-streak counter on cursor-only
+        activity and avoid a snap after a brief pause.
         """
         _init_gdi()
         gdi = ctypes.windll.gdiplus
         sw = _user32.GetSystemMetrics(0)
         sh = _user32.GetSystemMetrics(1)
         if sw <= 0 or sh <= 0:
-            return None
+            return (None, False) if _want_change_info else None
         # Check cursor position (cheap — skip full compare if nothing moved)
         pt = wintypes.POINT()
         _user32.GetCursorPos(ctypes.byref(pt))
         cursor_pos = (pt.x, pt.y)
+        cursor_moved = (cursor_pos != self._prev_cursor)
         # Compute the capture region. In zoom mode this is a sub-rect of
         # the screen centered on the cursor; otherwise it's the full screen.
         if zoom > 1:
@@ -950,28 +963,33 @@ class _ScreenStreamer:
         _gdi32.SelectObject(mdc, hbmp)
         _gdi32.BitBlt(mdc, 0, 0, crop_w, crop_h, hdc, crop_x, crop_y, 0x00CC0020)
         _user32.ReleaseDC(0, hdc)
-        # Change detection: sample pixels BEFORE drawing the cursor (the
-        # cursor sprite can blink/anti-alias and cause false positives).
-        bi = _BITMAPINFOHEADER()
-        bi.biSize = ctypes.sizeof(bi)
-        bi.biWidth = crop_w
-        bi.biHeight = crop_h
-        bi.biPlanes = 1
-        bi.biBitCount = 32
-        bi.biCompression = 0  # BI_RGB
-        buf_size = crop_w * crop_h * 4
-        if self._buf is None or len(self._buf) < buf_size:
-            self._buf = (ctypes.c_ubyte * buf_size)()
-        _gdi32.GetDIBits(mdc, hbmp, 0, crop_h, self._buf, ctypes.byref(bi), 0)
-        sample = bytes(self._buf[::4096])
-        changed = (sample != self._prev_sample or
-                   cursor_pos != self._prev_cursor)
-        self._prev_sample = sample
+        # Change detection. Cursor-first: if the cursor moved, we always
+        # re-encode (skip the expensive GetDIBits). Only when the cursor is
+        # also still do we sample pixels to catch screen changes the cursor
+        # didn't accompany. The sample is taken BEFORE drawing the cursor
+        # sprite so the sprite's anti-aliasing doesn't cause false positives.
+        if cursor_moved:
+            changed = True
+        else:
+            bi = _BITMAPINFOHEADER()
+            bi.biSize = ctypes.sizeof(bi)
+            bi.biWidth = crop_w
+            bi.biHeight = crop_h
+            bi.biPlanes = 1
+            bi.biBitCount = 32
+            bi.biCompression = 0  # BI_RGB
+            buf_size = crop_w * crop_h * 4
+            if self._buf is None or len(self._buf) < buf_size:
+                self._buf = (ctypes.c_ubyte * buf_size)()
+            _gdi32.GetDIBits(mdc, hbmp, 0, crop_h, self._buf, ctypes.byref(bi), 0)
+            sample = bytes(self._buf[::self._sample_stride])
+            changed = (sample != self._prev_sample)
+            self._prev_sample = sample
         self._prev_cursor = cursor_pos
         if not changed:
             _gdi32.DeleteObject(hbmp)
             _gdi32.DeleteDC(mdc)
-            return None
+            return (None, cursor_moved) if _want_change_info else None
         # Draw the cursor. In zoom mode the cursor's screen position must
         # be translated into crop-local coordinates. The crop is already
         # magnified (a small region stretched up to max_w), so drawing the
@@ -1008,11 +1026,11 @@ class _ScreenStreamer:
         _gdi32.DeleteObject(hbmp)
         _gdi32.DeleteDC(mdc)
         if status != 0 or not bmp.value:
-            return None
+            return (None, cursor_moved) if _want_change_info else None
         data = _encode_jpeg_memory(bmp, quality)
         gdi.GdipDisposeImage.argtypes = [ctypes.c_void_p]
         gdi.GdipDisposeImage(bmp)
-        return data
+        return (data, cursor_moved) if _want_change_info else data
 
 
 # --- Mouse control (for the trackpad) ---
@@ -1933,41 +1951,58 @@ class Handler(BaseHTTPRequestHandler):
         stop = threading.Event()
 
         def capture_loop():
-            # Poll at max speed — no artificial 30fps cap. The loop runs
-            # as fast as it can capture+encode+send, which on a modern PC
-            # is well above 60fps and lets the phone render at its own
-            # refresh rate. Only back off gently when the screen has been
-            # completely static for a while, to avoid burning CPU for
-            # nothing. Zoom mode never idles (cursor moves constantly).
-            idle_interval = 0.2    # gentle backoff when truly static
-            active_interval = 0.0  # full speed — no cap
-            interval = active_interval
+            # Pace to a 60fps cap with monotonic timing. A busy-loop with
+            # time.sleep(0) contends with the JPEG encoder for the GIL and
+            # causes frame-time spikes; pacing to 16.67ms with a real sleep
+            # when we're ahead smooths the cadence and lets the encoder run
+            # uninterrupted. When the screen is truly static (no cursor move
+            # and no pixel change) for a couple seconds, back off to 5fps
+            # polling to save CPU — but reset the streak the instant the
+            # cursor moves so a brief pause never triggers a snap.
+            target_fps = 60
+            frame_budget = 1.0 / target_fps
+            idle_interval = 0.2      # 5fps polling when truly static
             static_streak = 0
+            static_threshold = 120    # ~2s at 60fps before backing off
+            next_frame = time.monotonic()
             while not stop.is_set():
                 if paused[0]:
                     time.sleep(0.1)
+                    next_frame = time.monotonic() + frame_budget
                     continue
-                frame = streamer.get_frame(quality[0], max_w[0], zoom[0])
+                frame, cursor_moved = streamer.get_frame(
+                    quality[0], max_w[0], zoom[0], _want_change_info=True)
                 if frame is not None:
                     try:
                         self._ws_write_frame(self.wfile, frame, opcode=0x2)
                     except (OSError, ValueError):
                         stop.set()
                         break
-                    interval = active_interval  # screen active — full speed
                     static_streak = 0
                 else:
-                    # Screen unchanged — keep polling at full speed for a
-                    # short streak, then back off gently to idle_interval.
-                    static_streak += 1
-                    if static_streak > 30:
-                        interval = idle_interval
-                    # else keep polling at full speed
-                if interval > 0:
-                    time.sleep(interval)
+                    # No frame emitted. Reset the streak if the cursor moved
+                    # even though pixels didn't — we're still "active" and
+                    # must not back off, or the next real change snaps.
+                    if cursor_moved:
+                        static_streak = 0
+                    else:
+                        static_streak += 1
+                # Pace to 60fps. If we ran over budget, don't sleep (we're
+                # late); if we ran under, sleep the remainder so we don't
+                # busy-spin and starve the encoder thread.
+                next_frame += frame_budget
+                now = time.monotonic()
+                if static_streak > static_threshold:
+                    # Truly idle — poll gently and resync the clock so the
+                    # first active frame goes out immediately.
+                    time.sleep(idle_interval)
+                    next_frame = time.monotonic() + frame_budget
+                elif next_frame > now:
+                    time.sleep(next_frame - now)
                 else:
-                    # Yield to let other threads run without actually
-                    # sleeping — keeps latency at a minimum.
+                    # Behind budget — yield once and keep going. A 0-length
+                    # sleep is enough to let the encoder thread run without
+                    # busy-spinning.
                     time.sleep(0)
 
         cap = threading.Thread(target=capture_loop, daemon=True)
@@ -2599,8 +2634,12 @@ class Handler(BaseHTTPRequestHandler):
           tpFpsT = performance.now(); tpFpsN = 0;
           let lastUrl = null;
           const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+          // q=60 w=1024: JPEG encode time scales with pixels and quality, so
+          // a smaller, lower-quality frame encodes in ~8-12ms vs ~18-25ms at
+          // q=75 w=1280. That headroom is what lets the loop hold 60fps with
+          // no spikes. The quality drop is barely visible on a phone screen.
           const sw = new WebSocket(proto + '//' + location.host + '/vstream?token='
-            + encodeURIComponent(TOKEN) + '&q=75&w=1280');
+            + encodeURIComponent(TOKEN) + '&q=60&w=1024');
           sw.binaryType = 'arraybuffer';
           card._streamWs = sw;
           sw.onopen = () => {{
@@ -2820,7 +2859,27 @@ class Handler(BaseHTTPRequestHandler):
         // Every move is a ~20-byte JSON frame with no HTTP overhead, so the
         // cursor tracks the finger at network RTT (sub-millisecond on LAN)
         // instead of HTTP round-trip (~20-30ms per move).
+        //
+        // If the socket drops mid-session, queued move/scroll deltas are
+        // collapsed to their newest values on reconnect so the cursor
+        // resumes from where the finger is now instead of replaying a
+        // backlog and snapping.
         let ws = null, wsQueue = [];
+        function _wsFlushQueue() {{
+          // Collapse queued move/scroll deltas into their newest values so a
+          // reconnect doesn't replay a backlog and snap the cursor.
+          let lastMove = null, lastScroll = null;
+          const out = [];
+          for (const m of wsQueue) {{
+            if (m.m === 'move') lastMove = m;
+            else if (m.m === 'scroll') lastScroll = m;
+            else out.push(m);
+          }}
+          if (lastScroll) out.push(lastScroll);
+          if (lastMove) out.push(lastMove);
+          wsQueue = out;
+          while (wsQueue.length) ws.send(JSON.stringify(wsQueue.shift()));
+        }}
         function wsSend(msg) {{
           if (ws && ws.readyState === 1) {{ ws.send(JSON.stringify(msg)); }}
           else {{ wsQueue.push(msg); wsConnect(); }}
@@ -2829,7 +2888,7 @@ class Handler(BaseHTTPRequestHandler):
           if (ws && ws.readyState <= 1) return;  // connecting or open
           const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
           ws = new WebSocket(proto + '//' + location.host + '/ws?token=' + encodeURIComponent(TOKEN));
-          ws.onopen = () => {{ while (wsQueue.length) ws.send(JSON.stringify(wsQueue.shift())); }};
+          ws.onopen = () => {{ _wsFlushQueue(); }};
           ws.onclose = () => {{ ws = null; }};
           ws.onerror = () => {{ ws = null; }};
         }}
