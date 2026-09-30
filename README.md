@@ -1,5 +1,7 @@
 # PC Remote
 
+![PC Remote on a phone: Remote, Terminal, Controls and System](docs/screenshots/hero.webp)
+
 Control your Windows PC from your phone: a live, low-latency view of the
 screen with a trackpad and keyboard, a real terminal, and one-tap power and
 media controls. It's a small Python server on `0.0.0.0:1024`; open it in any
@@ -27,6 +29,18 @@ browser on the same network (or over Tailscale).
   busiest apps once a second), and the server only samples while it's open.
   While it's showing, the phone's screen stays on (on the HTTPS address), so
   it works as a second screen.
+
+## Screenshots
+
+On a computer, the picture takes most of the window, with the trackpad and
+keys below:
+
+![The Remote tab in a desktop browser](docs/screenshots/desktop-remote.webp)
+
+The System tab as a dashboard: every core (performance cores drawn bigger),
+memory, GPU, disks, network and the busiest apps, 20 updates a second:
+
+![The System tab in a desktop browser](docs/screenshots/desktop-system.webp)
 
 ## Setup
 
