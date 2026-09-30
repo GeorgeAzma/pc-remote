@@ -974,3 +974,45 @@ def process_path(pid: int) -> str | None:
         return buf.value if _QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)) else None
     finally:
         _CloseHandle(h)
+
+
+_ProcessIdToSessionId = _fn(kernel32, "ProcessIdToSessionId", wintypes.BOOL, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD))
+
+
+def process_session(pid: int) -> int | None:
+    """The sign-in session a process runs in (0: services)."""
+    s = wintypes.DWORD()
+    return s.value if _ProcessIdToSessionId(pid, ctypes.byref(s)) else None
+
+
+_GetExtendedTcpTable = _fn(ctypes.WinDLL("iphlpapi"), "GetExtendedTcpTable", wintypes.DWORD, ctypes.c_void_p,
+                           ctypes.POINTER(wintypes.DWORD), wintypes.BOOL, wintypes.ULONG, ctypes.c_int, wintypes.ULONG)
+
+
+def tcp_owner(src: str, sport: int, dst: str, dport: int) -> int | None:
+    """The process that owns the src:sport -> dst:dport end of a TCP
+    connection, if that end is a socket on this PC (not, say, WSL or a VM
+    behind this PC's address)."""
+    import ipaddress
+    s, d = ipaddress.ip_address(src), ipaddress.ip_address(dst)
+    v6 = s.version == 6
+    size, buf = wintypes.DWORD(0), None
+    for _ in range(4):  # (the table can grow between the size query and the read)
+        buf = ctypes.create_string_buffer(max(size.value, 4))
+        r = _GetExtendedTcpTable(buf, ctypes.byref(size), False, 23 if v6 else 2, 5, 0)  # TCP_TABLE_OWNER_PID_ALL
+        if r == 0:
+            break
+        if r != 122:  # ERROR_INSUFFICIENT_BUFFER
+            return None
+    else:
+        return None
+    port = lambda p: ((p & 0xFF) << 8) | ((p >> 8) & 0xFF)  # network byte order in the low 16 bits
+    for i in range(struct.unpack_from("<I", buf, 0)[0]):
+        if v6:  # MIB_TCP6ROW_OWNER_PID
+            la, _, lp, ra, _, rp, _, pid = struct.unpack_from("<16sII16sIIII", buf, 4 + i * 56)
+        else:  # MIB_TCPROW_OWNER_PID
+            _, la, lp, ra, rp, pid = struct.unpack_from("<6I", buf, 4 + i * 24)
+            la, ra = struct.pack("<I", la), struct.pack("<I", ra)
+        if la == s.packed and port(lp) == sport and ra == d.packed and port(rp) == dport:
+            return pid
+    return None

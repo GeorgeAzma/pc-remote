@@ -51,6 +51,10 @@ TOKEN = os.environ.get("PC_API_TOKEN", "")
 WEB = os.path.join(paths.RES, "web")
 HOME = os.path.realpath(os.path.expanduser("~"))
 DOWNLOADS = os.path.join(HOME, "Downloads")
+# programs that connect from this PC on behalf of something else: containers,
+# WSL, tunnels, port forwards. They sign in like any other device.
+FORWARDERS = {"com.docker.backend", "com.docker.proxy", "vpnkit", "wslrelay", "wslhost", "tailscaled", "tailscale",
+              "ssh", "sshd", "cloudflared", "ngrok", "frpc", "svchost"}
 
 ALLOWED_HOSTS = {h.strip().lower() for h in os.environ.get("PC_ALLOWED_HOSTS", "").split(",") if h.strip()}
 
@@ -146,10 +150,37 @@ class Handler(BaseHTTPRequestHandler):
         return ""
 
     def _local(self) -> bool:
-        """The PC itself: never asked to sign in (it's where you'd see the code).
-        Not when a proxy on the PC (e.g. Tailscale Serve) forwards someone else."""
-        return (self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
-                and not self.headers.get("X-Forwarded-For") and not self.headers.get("Forwarded"))
+        """The PC itself: never asked to sign in (it's where you'd see the
+        code), whichever of its addresses it opens. Not a proxy that forwards
+        someone else (X-Forwarded-For)."""
+        if self.headers.get("X-Forwarded-For") or self.headers.get("Forwarded"):
+            return False
+        if self._pc is None:  # (per connection: it can't change)
+            self._pc = self._from_pc()
+        return self._pc
+
+    _pc = None
+
+    def _from_pc(self) -> bool:
+        """A program in your session on this PC, not something that relays for
+        others. A connection to one of the PC's own addresses comes from that
+        same address, but so do WSL and containers (behind the PC's address or
+        through Docker on 127.0.0.1): what tells them apart is who owns the
+        other end of the connection."""
+        try:
+            peer_ip, peer_port = self.client_address[:2]
+            own_ip, own_port = self.connection.getsockname()[:2]
+            peer, own = ipaddress.ip_address(peer_ip), ipaddress.ip_address(own_ip)
+        except (OSError, ValueError):
+            return False
+        if not (peer.is_loopback or peer == own):
+            return False  # another device
+        pid = win32.tcp_owner(str(peer), peer_port, str(own), own_port)
+        if not pid:
+            return False  # no program on the PC: WSL, a VM
+        name = os.path.splitext(os.path.basename(win32.process_path(pid) or ""))[0].lower()
+        return (bool(name) and name not in FORWARDERS
+                and win32.process_session(pid) == win32.process_session(os.getpid()))
 
     def _credential(self, query) -> str:
         return query.get("token", [""])[0] or self.headers.get("X-Token", "") or self._cookie_token()
@@ -159,7 +190,7 @@ class Handler(BaseHTTPRequestHandler):
         return auth.valid(cand) or bool(TOKEN) and hmac.compare_digest(cand.encode(), TOKEN.encode())
 
     def _authorized(self, query, reply=True) -> bool:
-        if self._local() or not (auth.required() or TOKEN) or self._signed_in(query):
+        if not (auth.required() or TOKEN) or self._signed_in(query) or self._local():
             return True
         if reply:
             self.close_connection = True  # the request body (if any) goes unread

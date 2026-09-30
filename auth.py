@@ -4,7 +4,7 @@ A device signs in once, from anywhere (home Wi-Fi, Tailscale), with the
 access code or your own password, or by scanning the pairing QR code shown
 on the PC or on any device that's already signed in. Signed-in devices
 hold a key and stay signed in until you sign them all out (a new key).
-The PC itself (127.0.0.1) never needs to sign in.
+The PC itself never needs to sign in, whichever of its addresses it opens.
 
 Stored in %LOCALAPPDATA%\\PC Remote\\auth.json (or the source folder when
 run from source): the key, the generated code (so the PC can show it), or
