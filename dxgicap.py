@@ -6,6 +6,7 @@ ffmpeg's ddagrab does the same capture but doesn't pass them on. Vtable
 indices are from the Windows SDK headers (dxgi1_2.h, d3d11.h)."""
 import ctypes
 import math
+import os
 from ctypes import wintypes
 
 from win32 import _GUID, LPVOID
@@ -111,7 +112,8 @@ _d3d11 = _compiler = None
 def _compile(src: bytes, target: bytes):
     global _compiler
     if _compiler is None:
-        _compiler = ctypes.WinDLL("d3dcompiler_47")
+        # by full path: it isn't a KnownDLL, and a packaged app looks for bare names in its own folder
+        _compiler = ctypes.WinDLL(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "d3dcompiler_47.dll"))
         _compiler.D3DCompile.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, LPVOID, LPVOID,
                                          ctypes.c_char_p, ctypes.c_char_p, _UINT, _UINT, _PP, _PP]
     code, err = LPVOID(), LPVOID()

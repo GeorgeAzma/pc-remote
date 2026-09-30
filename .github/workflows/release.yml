@@ -1,0 +1,98 @@
+# Builds the Windows installer on every version tag (v1.0.0, …) and attaches
+# it to a GitHub release. Run it by hand from the Actions tab to just build.
+#
+# Signing is free for open-source projects through SignPath Foundation
+# (https://signpath.org). Once the project is approved, add:
+#   secret   SIGNPATH_API_TOKEN
+#   variable SIGNPATH_ORGANIZATION_ID
+# and set up two signing requests' artifact configurations in SignPath:
+# "app" (the PC Remote.exe inside the zipped app folder) and "installer".
+# Without them the build still works, unsigned.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      SIGN: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tags, for the version
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dependencies
+        run: |
+          python -m pip install -r requirements.txt pyinstaller
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) { choco install innosetup --no-progress -y }
+
+      - name: Build the app
+        run: python packaging/build.py --app-only
+
+      # ---- sign PC Remote.exe (SignPath) ----
+      - name: Upload the app for signing
+        if: env.SIGN == 'true'
+        id: app
+        uses: actions/upload-artifact@v4
+        with:
+          name: app
+          path: dist/PC Remote/PC Remote.exe
+      - name: Sign the app
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: pc-remote
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: app
+          github-artifact-id: ${{ steps.app.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-app
+      - name: Use the signed app
+        if: env.SIGN == 'true'
+        run: Copy-Item "signed-app/PC Remote.exe" "dist/PC Remote/PC Remote.exe" -Force
+
+      - name: Build the installer
+        run: python packaging/build.py --installer-only
+
+      # ---- sign the installer (SignPath) ----
+      - name: Upload the installer
+        id: setup
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: dist/PC-Remote-Setup-*.exe
+      - name: Sign the installer
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: pc-remote
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.setup.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-setup
+      - name: Use the signed installer
+        if: env.SIGN == 'true'
+        run: Copy-Item "signed-setup/*.exe" dist/ -Force
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/PC-Remote-Setup-*.exe
+          generate_release_notes: true

@@ -352,6 +352,12 @@ async function boot() {
   registerView('term', term);
   registerView('controls', controls);
   registerView('monitor', monitor);
-  showTab(settings.tab);
+  // Opened from the PC (Start menu, or right after installing): show its
+  // addresses to open on a phone, not a picture of its own screen.
+  if (new URLSearchParams(location.search).has('welcome')) {
+    history.replaceState(null, '', location.pathname);
+    showTab('controls');
+    controls.welcome();
+  } else showTab(settings.tab);
 }
 boot();

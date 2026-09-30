@@ -473,6 +473,7 @@ function resultSheet(title, r) {
 
 // ---------------------------------------------------------- lifecycle ---
 let loaded = false;
+export function welcome() { aboutSheet(); }
 export function show() {
   active = true;
   if (!loaded) { loaded = true; load(); } else api('/api/state').then(d => { state = d.state; pending = d.pending; render(); }).catch(() => {});

@@ -231,6 +231,14 @@ class Watcher:
             return views, max((s.spec.fps for v in views for s in v.subs), default=0)
 
     def _run(self):
+        try:
+            self._loop()
+        except Exception as e:  # noqa: BLE001 - anything unexpected: viewers fall back to ffmpeg's JPEG
+            import logging
+            logging.getLogger("pc-remote").exception("tiled JPEG capture failed")
+            self._fail(f"capture failed: {e}")
+
+    def _loop(self):
         dup, fails, last_full, next_due, last_tick, sizes = None, 0, 0.0, 0.0, 0.0, set()
         try:
             while True:

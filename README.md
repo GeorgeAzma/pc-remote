@@ -42,7 +42,28 @@ memory, GPU, disks, network and the busiest apps, 20 updates a second:
 
 ![The System tab in a desktop browser](docs/screenshots/desktop-system.webp)
 
-## Setup
+## Install
+
+Download **PC-Remote-Setup.exe** from
+[Releases](https://github.com/GeorgeAzma/pc-remote/releases) and run it.
+Everything is included (Python, ffmpeg); nothing else to install. It:
+
+- starts PC Remote at sign-in, with admin rights (so it can type into admin
+  windows) and without a UAC prompt, in your session (screen capture and
+  input need the desktop);
+- opens the firewall for it on your home network (Windows' *Private*
+  networks) and from your Tailscale devices on any network, but never on
+  public networks;
+- adds *PC Remote* to the Start menu: it opens a page on the PC with its
+  addresses, to open on your phone (`http://<PC-IP>:1024/`).
+
+Uninstalling removes all of that again. Settings and certificates live in
+`%LOCALAPPDATA%\PC Remote`.
+
+On the phone, Controls → About → *Install as app* shows how to add it to your
+home screen, so it opens full-screen.
+
+**Run from source** instead:
 
 ```bat
 winget install Gyan.FFmpeg
@@ -51,8 +72,17 @@ python -m venv .venv
 launch_remote.bat
 ```
 
-Then open `http://<PC-IP>:1024/` on your phone. Controls → About → *Install
-as app* shows how to add it to your home screen, so it opens full-screen.
+**Build the installer** (`dist\PC-Remote-Setup-<version>.exe`):
+
+```bat
+.venv\Scripts\pip install pyinstaller
+winget install JRSoftware.InnoSetup
+.venv\Scripts\python packaging\build.py
+```
+
+Pushing a `v*` tag builds it on GitHub and attaches it to a release (see
+`.github/workflows/release.yml`, which also signs it through SignPath once
+that's set up).
 
 **HD stream (recommended).** Browsers only allow the lowest-latency H.264
 decoder (WebCodecs) on secure pages. Over plain `http://` the stream uses
@@ -256,11 +286,14 @@ def say(text: str = ""):
 | `win32.py` | ctypes: input injection, clipboard, cursor shapes, displays, audio, stats |
 | `wsock.py` | minimal WebSocket implementation |
 | `certs.py` | local CA and server certificate for HTTPS |
+| `paths.py`, `setup_win.py` | where files live when installed; the startup task and firewall rules |
+| `packaging/` | the Windows build: `build.py` (PyInstaller + ffmpeg + Inno Setup), `installer.iss`, `icon.ico` |
 | `web/` | the app: `remote.js`, `term.js` (VT emulator), `controls.js`, `monitor.js` (System tab), `app.js` |
 
-## Run at Windows startup (elevated)
+## Run at Windows startup from source (elevated)
 
-Scheduled Tasks can start the server with admin rights and no UAC prompt.
+The installer sets this up for you. From source, Scheduled Tasks can start
+the server with admin rights and no UAC prompt.
 You only need admin for a few things: typing into elevated windows, and the
 Wi-Fi fallback when the radio API isn't available.
 

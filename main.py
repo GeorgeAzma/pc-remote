@@ -31,12 +31,14 @@ import os
 import socket
 import ssl
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
 import certs
 import commands
+import paths
 import remote
 import terminal
 import video
@@ -45,8 +47,7 @@ import wsock
 HOST = os.environ.get("PC_API_HOST", "0.0.0.0")
 PORT = int(os.environ.get("PC_API_PORT", "1024"))
 TOKEN = os.environ.get("PC_API_TOKEN", "")
-ROOT = os.path.dirname(os.path.abspath(__file__))
-WEB = os.path.join(ROOT, "web")
+WEB = os.path.join(paths.RES, "web")
 HOME = os.path.realpath(os.path.expanduser("~"))
 DOWNLOADS = os.path.join(HOME, "Downloads")
 
@@ -399,13 +400,56 @@ class Handler(BaseHTTPRequestHandler):
         return self._file(p, attachment=os.path.basename(p), cache="no-store")
 
 
+def _running() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", PORT), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _open_page():
+    import webbrowser
+    webbrowser.open(f"http://localhost:{PORT}/?welcome")  # the PC's addresses, to open on a phone
+
+
 def main():
-    if sys.stderr is None:  # pythonw: no console, keep a small log instead
-        logging.basicConfig(filename=os.path.join(ROOT, "server.log"), level=logging.WARNING,
+    """PC Remote.exe            start (or find) the server and open its page
+       PC Remote.exe --background   just serve (the sign-in task)
+       PC Remote.exe --setup / --unsetup   startup task + firewall (the installer)"""
+    args = sys.argv[1:]
+    if "--setup" in args or "--unsetup" in args:
+        import setup_win
+        if "--setup" in args:
+            setup_win.install(sys.executable, startup="--no-startup" not in args)
+        else:
+            setup_win.uninstall()
+        return
+    background = "--background" in args
+    if _running():  # already serving: someone opened it from the Start menu
+        if not background:
+            _open_page()
+        return
+    if paths.FROZEN and not background:
+        import setup_win
+        if setup_win.task_exists() and setup_win.run_task():  # the elevated copy, no UAC prompt
+            for _ in range(60):
+                if _running():
+                    break
+                time.sleep(0.25)
+            _open_page()
+            return
+    if sys.stderr is None:  # no console: keep a small log instead
+        logging.basicConfig(filename=os.path.join(paths.DATA, "server.log"), level=logging.WARNING,
                             format="%(asctime)s %(levelname)s %(message)s")
     else:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
+    # a crash in a worker thread would otherwise vanish without a console
+    threading.excepthook = lambda a: log.error("thread %s crashed", a.thread and a.thread.name,
+                                               exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
     server = Server((HOST, PORT), Handler)
+    if not background and paths.FROZEN:
+        threading.Timer(0.8, _open_page).start()
     if not os.environ.get("PC_NO_TLS"):
         try:
             server.tls = certs.context()

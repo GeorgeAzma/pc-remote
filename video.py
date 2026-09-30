@@ -39,6 +39,7 @@ import threading
 import time
 from collections import deque
 
+import paths
 import tiles
 import win32
 
@@ -91,7 +92,8 @@ def tuning(q: float) -> dict:
 # ffmpeg discovery / capabilities
 # --------------------------------------------------------------------------
 def find_ffmpeg() -> str | None:
-    cand = [os.environ.get("PC_FFMPEG"), shutil.which("ffmpeg")]
+    # the installed app ships its own (an LGPL build, next to the .exe)
+    cand = [os.environ.get("PC_FFMPEG"), os.path.join(paths.APP, "ffmpeg", "ffmpeg.exe"), shutil.which("ffmpeg")]
     local = os.environ.get("LOCALAPPDATA", "")
     cand.append(os.path.join(local, "Microsoft", "WinGet", "Links", "ffmpeg.exe"))
     cand += sorted(glob.glob(os.path.join(local, "Microsoft", "WinGet", "Packages", "*FFmpeg*", "*", "bin", "ffmpeg.exe")), reverse=True)

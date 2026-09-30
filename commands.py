@@ -487,7 +487,11 @@ def _gpus() -> list[str]:
 
 
 def _server_version():
-    """(short commit, its time) the server runs from, read from .git (no git needed)."""
+    """(version, its time): the release of an installed build, else the git
+    commit the source runs from (read from .git, no git needed)."""
+    import paths
+    if paths.version():
+        return paths.version(), None
     g = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".git")
     try:
         head = open(os.path.join(g, "HEAD")).read().strip()

@@ -12,7 +12,9 @@ import os
 import socket
 import ssl
 
-DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".certs")
+import paths
+
+DIR = os.path.join(paths.DATA, ".certs")
 CA_CERT, CA_KEY = os.path.join(DIR, "ca.crt"), os.path.join(DIR, "ca.key")
 CERT, KEY = os.path.join(DIR, "server.crt"), os.path.join(DIR, "server.key")
 
