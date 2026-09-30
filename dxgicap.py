@@ -81,8 +81,8 @@ def _check(hr, what):
 
 # A full-screen triangle, and an exact area-average shrink: each output
 # pixel is the average of the source pixels under it, each weighted by how
-# much of it the output pixel covers (what ffmpeg's "area" scaler and PIL's
-# BOX filter compute, on the GPU).
+# much of it the output pixel covers (what ffmpeg's "area" scaler computes,
+# on the GPU).
 _VS = b"""
 float4 main(uint id : SV_VertexID) : SV_Position {
     float2 uv = float2((id << 1) & 2, id & 2);

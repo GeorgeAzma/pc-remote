@@ -373,6 +373,7 @@ $('zoom-pill').addEventListener('click', () => { haptic(6); setView(1, 0, 0); })
 
 // ============================================================== layout ===
 // Largest screen that fits while the pad / keys / input keep their room.
+const MIN_PANEL = 220, MIN_PAD = 80;  // smallest sizes the grab bar drags the panel to
 function layout() {
   const root = stage.parentElement;
   const d = disp(), ar = d.w / d.h, gap = 8;
@@ -388,11 +389,15 @@ function layout() {
   // use whichever gives the bigger picture.
   const others = [strip, kb.closest('.inputbar'), $('clip-pill')].filter(x => !x.classList.contains('hidden'))
     .reduce((a, x) => a + (x.offsetHeight || 36) + gap, 0);
-  const minPad = typing ? 0 : Math.max(120, Math.min(220, H * 0.24));
+  // Beside or below the picture: decided by the screen's shape with the
+  // automatic sizes, so dragging the panel wider can't flip the layout.
+  const autoPad = typing ? 0 : Math.max(120, Math.min(220, H * 0.24)), autoPanel = clamp(W * 0.3, 260, 380);
+  const side = !typing && H >= 200 && Math.min(W - autoPanel - gap, H * ar) > Math.min(W, (H - others - autoPad - gap) * ar) * 1.08;
+  // ...then the sizes you dragged the grab bar to, keeping some picture.
+  const minPad = typing || !settings.padH ? autoPad : clamp(settings.padH, MIN_PAD, Math.max(MIN_PAD, H - others - gap - 60));
+  const panel = settings.panelW ? clamp(settings.panelW, MIN_PANEL, Math.max(MIN_PANEL, W - gap - 200)) : autoPanel;
   const stackedW = Math.max(0, Math.min(W, (H - others - minPad - gap) * ar));
-  const panel = clamp(W * 0.3, 260, 380);
   const sideW = Math.max(0, Math.min(W - panel - gap, H * ar));
-  const side = !typing && sideW > stackedW * 1.08 && H >= 200;  // where the panel goes when shown
   root.classList.toggle('side', side && !noPanel);
   root.style.setProperty('--panel-w', panel + 'px');
   document.body.classList.toggle('theater-b', theater && !side);
@@ -439,10 +444,8 @@ function placeGrip(root, side, off, typing) {
 // iPhone); leaving fullscreen (Esc) brings the panel back.
 let fsByUs = false;
 const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
-$('panel-grip').addEventListener('click', () => {
-  haptic(5);
-  const hide = !settings.hidePanel, de = document.documentElement;
-  const req = de.requestFullscreen || de.webkitRequestFullscreen;
+function setPanelHidden(hide) {
+  const de = document.documentElement, req = de.requestFullscreen || de.webkitRequestFullscreen;
   if (hide && !fsEl() && req) {
     fsByUs = true;
     try { Promise.resolve(req.call(de, { navigationUI: 'hide' })).catch(() => { fsByUs = false; }); } catch { fsByUs = false; }
@@ -451,13 +454,69 @@ $('panel-grip').addEventListener('click', () => {
     (document.exitFullscreen || document.webkitExitFullscreen).call(document)?.catch?.(() => {});
   }
   setSetting('hidePanel', hide);
-});
+}
 for (const ev of ['fullscreenchange', 'webkitfullscreenchange'])
   document.addEventListener(ev, () => {
     if (fsEl() || !fsByUs) return;
     fsByUs = false;
     if (settings.hidePanel) setSetting('hidePanel', false);
   });
+// Tap the grab bar to hide / show the panel; drag it to resize the panel
+// (its width beside the picture, the trackpad's height below it). Dragging
+// on past where it stops shrinking hides it; dragging the edge bar out
+// brings it back.
+const grip = $('panel-grip'), PAST = 80;
+let drag = null, dragged = false;
+grip.addEventListener('pointerdown', e => {
+  if (e.button > 0) return;
+  const side = grip.classList.contains('v'), r = pad.getBoundingClientRect(), key = side ? 'panelW' : 'padH';
+  drag = { id: e.pointerId, x: e.clientX, y: e.clientY, side, key, off: !!settings.hidePanel, moved: false,
+           min: side ? MIN_PANEL : MIN_PAD, prev: settings[key], at: null,
+           size0: settings.hidePanel ? 0 : side ? r.width : r.height };
+  grip.setPointerCapture(e.pointerId);
+});
+grip.addEventListener('pointermove', e => {
+  if (!drag || e.pointerId !== drag.id) return;
+  const d = drag.side ? drag.x - e.clientX : drag.y - e.clientY;  // + = the panel grows
+  if (!drag.moved && Math.abs(d) < 5) return;
+  if (!drag.moved) { drag.moved = true; grip.classList.add('dragging'); }
+  const size = drag.size0 + d;  // live below; saved on release
+  if (!settings.hidePanel) {
+    settings[drag.key] = Math.max(drag.min, Math.round(size));
+    layout();
+    const r = pad.getBoundingClientRect();
+    if (size < (drag.side ? r.width : r.height) - PAST) {  // dragged well past its smallest: hide
+      drag.at = size;
+      settings[drag.key] = drag.prev;
+      settings.hidePanel = true;
+      haptic(8);
+      layout();
+    }
+  } else if (size > (drag.at ?? PAST / 2) + 30) {  // out again from the edge (or back, mid-drag)
+    settings.hidePanel = false;
+    settings[drag.key] = Math.max(drag.min, Math.round(size));
+    haptic(8);
+    layout();
+  }
+});
+const endDrag = e => {
+  if (!drag || e.pointerId !== drag.id) return;
+  const { moved, off, key } = drag;
+  drag = null;
+  grip.classList.remove('dragging');
+  if (!moved) return;  // a tap: the click handler toggles
+  dragged = true;
+  setSetting(key, settings[key]);
+  if (!!settings.hidePanel !== off) setPanelHidden(!!settings.hidePanel);
+  else setSetting('hidePanel', !!settings.hidePanel);
+};
+grip.addEventListener('pointerup', endDrag);
+grip.addEventListener('pointercancel', endDrag);
+grip.addEventListener('click', () => {
+  if (dragged) { dragged = false; return; }
+  haptic(5);
+  setPanelHidden(!settings.hidePanel);
+});
 bus.addEventListener('layout', () => active && layout());
 
 // ====================================================== stream methods ===

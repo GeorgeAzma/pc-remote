@@ -17,8 +17,8 @@ Stream modes (the client picks one; see MODES):
                each frame until the next arrives, plus the media pipeline).
   jpeg         JPEG, for any browser. Normally tiled (tiles.py): only the parts
                of the screen that changed, as a few small JPEGs the phone paints
-               over its copy; a full-screen change is one plain JPEG. Without
-               numpy/simplejpeg/Pillow, or if in-process capture fails, ffmpeg's
+               over its copy; a full-screen change is sent whole, in 4 bands. Without
+               numpy/simplejpeg, or if in-process capture fails, ffmpeg's
                MJPEG (a whole JPEG per frame, newest wins) takes over.
 
 Rate control: each client ACKs every frame. Rising ACK delay or in-flight

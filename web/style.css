@@ -19,7 +19,7 @@
   --r: 14px;
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", Roboto, system-ui, sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Cascadia Code", Menlo, Consolas, monospace;
-  --tabbar-h: 50px;
+  --tabbar-h: 44px;
   --safe-b: env(safe-area-inset-bottom, 0px);
   --safe-t: env(safe-area-inset-top, 0px);
   --app-h: 100dvh;
@@ -70,11 +70,12 @@ body.kb-open .tabbar { display: none; }
 .tabbar button { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 2px; color: var(--gray); transition: color .15s; }
 .tabbar button span { font-size: 24px; }
-.tabbar button b { font-size: 10.5px; font-weight: 500; letter-spacing: .1px; }
 .tabbar button.active { color: var(--tint); }
 .tabbar .tabs-hide { flex: none; width: 44px; font-size: 18px; color: var(--label3); }
 /* Grab bars (a plain ribbon, like a sheet's grabber) that fold a panel away / bring it back */
-.grip { position: absolute; z-index: 6; opacity: .3; transition: opacity .15s; }
+.grip { position: absolute; z-index: 6; opacity: .3; transition: opacity .15s; touch-action: none; }
+.grip.v { cursor: ew-resize; } .grip.h { cursor: ns-resize; }
+.grip.dragging { opacity: .85; }
 .grip::after { content: ""; position: absolute; border-radius: 2px; background: var(--label); transition: transform .15s; }
 .grip.v { width: 22px; height: 80px; margin: -40px 0 0 -11px; }
 .grip.v::after { left: 9px; top: 20px; width: 4px; height: 40px; }
@@ -83,7 +84,7 @@ body.kb-open .tabbar { display: none; }
 .grip:hover, .grip:focus-visible { opacity: .6; }
 .grip.v:hover::after { transform: scaleY(1.15); } .grip.h:hover::after { transform: scaleX(1.15); }
 .grip:active { opacity: .8; }
-.tabs-handle { display: none; position: fixed; left: 50%; top: auto; bottom: var(--safe-b); margin: 0 0 0 -40px; z-index: 20; }
+.tabs-handle { cursor: pointer !important; display: none; position: fixed; left: 50%; top: auto; bottom: var(--safe-b); margin: 0 0 0 -40px; z-index: 20; }
 body.tabs-off .tabs-handle { display: block; }
 body.kb-open .tabs-handle { display: none; }
 /* stacked theater: the panel's bar sits at the bottom edge; reveal the panel first, then the tabs */
