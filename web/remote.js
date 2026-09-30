@@ -526,7 +526,7 @@ export const METHODS = [
   { id: 'h264', name: 'H.264', sub: 'Lowest latency · hardware decoded' },
   { id: 'hevc', name: 'HEVC', sub: 'Same latency · ~30% less data for the same picture' },
   { id: 'mse', name: 'Video player', sub: 'H.264 over plain HTTP · about 30–50 ms more delay' },
-  { id: 'jpeg', name: 'JPEG', sub: 'Works anywhere · many times the bandwidth' },
+  { id: 'jpeg', name: 'JPEG', sub: 'Works anywhere · sends only what changed; full-screen video uses much more data' },
 ];
 // '' = usable here, otherwise why not; null while still checking
 export const support = { auto: '', h264: null, hevc: null, mse: null, jpeg: null };
@@ -551,13 +551,16 @@ export function resolvePlan(want = settings.stream) {
 }
 export const resolveMode = want => resolvePlan(want).mode;
 // The quality <-> latency slider (mirrors video.tuning() on the server).
+// Every level runs at the display's refresh rate; bitrate follows the link.
 export const QUALITY = [
-  { name: 'Fastest', sub: 'Every refresh · 3/4 resolution · lowest delay' },
-  { name: 'Smooth', sub: 'Every refresh · quick encode' },
-  { name: 'Balanced', sub: 'Every refresh · good detail' },
-  { name: 'Sharp', sub: 'Up to 60 fps · full resolution · finer detail' },
-  { name: 'Sharpest', sub: 'Up to 30 fps · full resolution · best detail, more delay' },
+  { name: 'Fastest', sub: '3/4 resolution · smallest frames · lowest delay' },
+  { name: 'Smooth', sub: 'Quick encode · small frames' },
+  { name: 'Balanced', sub: 'Good detail' },
+  { name: 'Sharp', sub: 'Full resolution · finer detail' },
+  { name: 'Sharpest', sub: 'Full resolution · best detail · a little more delay' },
 ];
+// Max bitrate steps (Mb/s); the last one is "no limit".
+const MAXBR = [2, 3, 5, 8, 12, 20, 30, 50, 80, 0];
 export const qualityLevel = q => QUALITY[Math.round(q * 4)];
 
 // =============================================================== video ===
@@ -680,6 +683,7 @@ const video = {
   desired() {
     const dpr = window.devicePixelRatio || 1;
     return { t: 'cfg', mode: this.plan.mode, alt: this.plan.alt, display: dispIdx, q: settings.quality,
+      maxbr: settings.maxMbps ? settings.maxMbps * 1e6 : 0,
       w: Math.round(stageBox.w * dpr * view.s), h: Math.round(stageBox.h * dpr * view.s), fps: refreshRate };
   },
   wantConfig() {
@@ -692,7 +696,7 @@ const video = {
     // Resolution changes under ~10% aren't worth an encoder switch.
     const prev = this.sentCfg && JSON.parse(this.sentCfg);
     if (prev && prev.mode === c.mode && prev.alt === c.alt && prev.display === c.display && prev.fps === c.fps
-        && prev.q === c.q && Math.abs(c.w / prev.w - 1) < 0.1) return;
+        && prev.q === c.q && prev.maxbr === c.maxbr && Math.abs(c.w / prev.w - 1) < 0.1) return;
     this.sentCfg = JSON.stringify(c);
     this.send(c);
   },
@@ -893,7 +897,7 @@ setInterval(() => {
   // JPEG sends nothing while the screen is still; that's healthy, not stalled.
   const still = video.mode === 'jpeg' && s.fps < 1 && video.ws.readyState === 1 && now - (video.lastPong || 0) < 5000;
   status(video.ws.readyState === 1 && (now - video.lastDraw < 3000 || still) ? 'ok' : 'warn',
-         still ? `${tag}still` : `${tag}${Math.round(s.fps)} fps${s.lat > 0 ? ' · ' + Math.round(s.lat) + ' ms' : ''}`);
+         still ? `${tag}still` : `${tag}${Math.round(s.fps)} fps`);
   const hud = $('hud');
   hud.classList.toggle('hidden', !settings.stats);
   if (settings.stats) {
@@ -1172,13 +1176,21 @@ export function streamSettings() {
   const name = h('b', {}, lvl.name), sub = h('div', { class: 'd' }, lvl.sub);
   const q = new Slider({ value: settings.quality, min: 0, max: 1, step: 0.25, thin: true, format: () => '',
     onInput: v => { const l = qualityLevel(v); name.textContent = l.name; sub.textContent = l.sub; setSetting('quality', v); } });
+  const brLabel = i => MAXBR[i] ? `${MAXBR[i]} Mb/s` : 'No limit';
+  const brIdx = Math.max(0, MAXBR.indexOf(settings.maxMbps || 0));
+  const brName = h('b', {}, brLabel(brIdx));
+  const br = new Slider({ value: brIdx, min: 0, max: MAXBR.length - 1, step: 1, thin: true, format: () => '',
+    onInput: i => { i = Math.round(i); brName.textContent = brLabel(i); setSetting('maxMbps', MAXBR[i]); } });
   return h('div', {},
     h('div', { class: 'group-title' }, 'Stream method'), list,
     h('div', { class: 'group-title' }, 'Picture'),
     h('div', { class: 'card' },
       h('div', { class: 'setting col' },
         h('div', { class: 'hd' }, h('span', {}, 'Speed ↔ Quality'), name), q.el,
-        h('div', { class: 'ends' }, h('span', {}, 'Lower latency, more fps'), h('span', {}, 'Sharper')), sub),
+        h('div', { class: 'ends' }, h('span', {}, 'Lower latency'), h('span', {}, 'Sharper')), sub),
+      h('div', { class: 'setting col' },
+        h('div', { class: 'hd' }, h('span', {}, 'Max bitrate'), brName), br.el,
+        h('div', { class: 'd' }, 'Caps the stream’s data use, e.g. on mobile data. It always runs at full frame rate and uses as much of the link as it can, up to this.')),
       swRow('Show stats', 'stats', 'Tap the status pill to toggle')));
 }
 
@@ -1240,7 +1252,7 @@ bus.addEventListener('settings', e => {
   if (k === 'hidePanel' && active) layout();
   if (!active || !video.ws) return;
   if (k === 'stream' && JSON.stringify(resolvePlan()) !== JSON.stringify(video.plan)) { video.stop(); video.start(); }
-  else if (k === 'quality') video.wantConfig();  // debounced, seamless switch
+  else if (k === 'quality' || k === 'maxMbps') video.wantConfig();  // debounced, seamless switch
 });
 document.addEventListener('visibilitychange', () => {
   if (!active) return;

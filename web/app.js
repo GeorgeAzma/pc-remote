@@ -53,6 +53,7 @@ const DEFAULTS = {
   speed: 1, accel: 0.6, scroll: 1, natural: true, touch: 'direct', stream: 'auto', quality: 0.5,
   stats: false, haptics: true, termFont: 13, tab: 'remote', recents: [], shell: 'ps',
   hidePanel: false, hideTabs: false, panelW: 0, padH: 0,  // 0 = automatic size
+  maxMbps: 0,  // stream bitrate limit, 0 = none
 };
 export const settings = { ...DEFAULTS, ...(JSON.parse(store('settings') || '{}')) };
 delete settings.fps;    // superseded by the Speed <-> Quality slider (+ display refresh)

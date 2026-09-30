@@ -13,10 +13,13 @@ browser on the same network (or over Tailscale).
   full-screen apps. Sessions survive tab switches, reconnects and phone
   locks.
 - **Controls**: sleep, lock, screen off, screenshot, media keys, volume and
-  brightness sliders, Wi-Fi/Bluetooth, stream method and quality, open app,
-  open link, send files either way, clipboard sync, running apps, and
-  timed shutdown/restart. Sleep, lock and power actions take two taps (the
-  first turns the button red); press and hold them for timers.
+  brightness sliders, Wi-Fi/Bluetooth, open app, open link, send files
+  either way, clipboard sync, running apps, and timed shutdown/restart.
+  Sleep, lock and power actions take two taps (the first turns the button
+  red); press and hold them for timers. The header shows CPU, RAM, GPU and
+  the live round trip to the PC. **About** at the bottom has the PC's
+  details, its addresses (with copy buttons), the certificate install guide
+  and how to install the remote as an app.
 
 ## Setup
 
@@ -27,8 +30,8 @@ python -m venv .venv
 launch_remote.bat
 ```
 
-Then open `http://<PC-IP>:1024/` on your phone. Tip: use *Add to Home Screen*
-so it opens full-screen, like an app.
+Then open `http://<PC-IP>:1024/` on your phone. Controls → About → *Install
+as app* shows how to add it to your home screen, so it opens full-screen.
 
 **HD stream (recommended).** Browsers only allow the lowest-latency H.264
 decoder (WebCodecs) on secure pages. Over plain `http://` the stream uses
@@ -38,8 +41,9 @@ more bandwidth than H.264. It switches itself to H.264 in a video player
 (30–50 ms slower) when the link is too slow for JPEG. Tap **HD** on the screen, or open
 `https://<PC-IP>:1024/`, to get both low latency and low bandwidth. The server makes
 its own certificate, so accept the warning once. To get rid of the warning
-for good, download `/ca.crt` on the phone and install it as a trusted CA
-(iOS: Settings → General → About → Certificate Trust Settings).
+for good, install it as a trusted CA: Controls → About → *Secure connection*
+walks you through it for iPhone/iPad, Android, Windows and Mac (and shows
+the fingerprint to check). The file itself is at `/ca.crt`.
 
 **Token.** Set `PC_API_TOKEN` in `launch_remote.bat` so random devices on
 your network can't control your PC. Open `/?token=YOUR_TOKEN` once; after
@@ -119,7 +123,7 @@ NVENC H.264: ultra-low-latency, no B-frames, infinite GOP, constant quality with
   sharpening it in the meantime.
 - Other GPUs: the server falls back to QSV, AMF, or libx264.
 
-**Stream method** (Controls → Stream method, or ⚙ on the Remote tab):
+**Stream method** (⚙ on the Remote tab):
 
 | Method | Needs | Latency | Bandwidth |
 | --- | --- | --- | --- |
@@ -174,18 +178,21 @@ picture was:
 
 **Speed ↔ Quality** slider, five steps:
 
-| Step | Frame rate | Resolution | Detail | Encoder preset | Frame size cap |
-| --- | --- | --- | --- | --- | --- |
-| Fastest | display refresh | ¾ of on-screen size | CQ 27 | p1 | ~1 frame |
-| Balanced | display refresh | on-screen size | CQ 22 | p4 | ~3 frames |
-| Sharpest | 30 fps | always native | CQ 16 | p6 | ~8 frames |
+| Step | Resolution | Detail | Encoder preset | Frame size cap |
+| --- | --- | --- | --- | --- |
+| Fastest | ¾ of on-screen size | CQ 27 | p1 | ~1 frame |
+| Balanced | on-screen size | CQ 22 | p4 | ~3 frames |
+| Sharpest | always native | CQ 16 | p6 | ~8 frames |
 
 A frame is never allowed to be larger than a few frame-times of bitrate,
 so a burst can't pile up delay. The steps in between interpolate.
-Changing the slider switches encoders seamlessly while you watch. The frame
-rate is also capped at both your screen's and the PC monitor's refresh
-rate. Bitrate follows the link automatically, so neither needs its own
-setting. For JPEG the slider sets the JPEG quality instead.
+Changing the slider switches encoders seamlessly while you watch. Every step
+runs at the full frame rate: the lower of your screen's and the PC
+monitor's refresh rate (more frames always look better). The bitrate
+follows the link, using as much of it as it can. **Max bitrate** caps that,
+e.g. on mobile data; it's off (no limit) by default. For JPEG the slider
+sets the JPEG quality instead, and the cap limits how fast frames go out,
+so the quality steps down to fit.
 
 ## Adding commands
 

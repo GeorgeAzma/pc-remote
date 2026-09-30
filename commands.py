@@ -11,6 +11,7 @@ import inspect
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 import webbrowser
@@ -425,6 +426,103 @@ def status():
     return {"status": "ok", "hostname": socket.gethostname(), "uptime_s": int(time.time() - START_TIME),
             "requests": REQUEST_COUNT, "last_command": LAST_COMMAND, "pending": pending_info(),
             **win32.STATS.snapshot()}
+
+
+_STARTED = time.time()
+_about_cache: dict = {}
+
+
+def _reg(path, name):
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as k:
+            return winreg.QueryValueEx(k, name)[0]
+    except OSError:
+        return None
+
+
+def _windows() -> str:
+    cv = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+    build = sys.getwindowsversion().build
+    # ProductName still says "Windows 10" on Windows 11
+    name = (_reg(cv, "ProductName") or "Windows").replace("Windows 10", "Windows 11" if build >= 22000 else "Windows 10")
+    rel, ubr = _reg(cv, "DisplayVersion"), _reg(cv, "UBR")
+    return " ".join(x for x in (name, rel, f"(build {build}{f'.{ubr}' if ubr else ''})") if x)
+
+
+def _gpus() -> list[str]:
+    cls = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+    out = []
+    for i in range(10):
+        d = _reg(rf"{cls}\{i:04d}", "DriverDesc")
+        if d and "Basic" not in d and d not in out:
+            out.append(d)
+    return out
+
+
+def _server_version():
+    """(short commit, its time) the server runs from, read from .git (no git needed)."""
+    g = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".git")
+    try:
+        head = open(os.path.join(g, "HEAD")).read().strip()
+        ref = head[5:] if head.startswith("ref: ") else None
+        if ref and os.path.exists(os.path.join(g, ref)):
+            return open(os.path.join(g, ref)).read().strip()[:7], os.path.getmtime(os.path.join(g, ref))
+        if ref:
+            sha = next(ln.split()[0] for ln in open(os.path.join(g, "packed-refs")) if ln.strip().endswith(ref))
+            return sha[:7], None
+        return head[:7], None
+    except (OSError, StopIteration):
+        return None, None
+
+
+def _ffmpeg_version():
+    import video
+    if not video.FFMPEG:
+        return None
+    try:
+        first = subprocess.run([video.FFMPEG, "-version"], capture_output=True, text=True, timeout=10,
+                               creationflags=0x08000000).stdout.splitlines()[0]
+        return first.split(" version ", 1)[1].split(" ")[0] if " version " in first else first
+    except (OSError, subprocess.SubprocessError, IndexError):
+        return None
+
+
+def _certificate():
+    """The local CA the HTTPS certificate is signed with, for the install guide."""
+    import certs
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes
+        with open(certs.CA_CERT, "rb") as f:
+            c = x509.load_pem_x509_certificate(f.read())
+        fp = c.fingerprint(hashes.SHA256()).hex().upper()
+        return {"sha256": ":".join(fp[i:i + 2] for i in range(0, len(fp), 2)),
+                "expires": c.not_valid_after_utc.timestamp(),
+                "name": c.subject.rfc4514_string()}
+    except Exception:  # noqa: BLE001 - no cryptography, or no certificate yet
+        return None
+
+
+@command("about", "PC, server and connection details.", hide=True)
+def about():
+    import certs
+    import tiles
+    import video
+    if not _about_cache:  # what doesn't change while the server runs
+        sha, when = _server_version()
+        _about_cache.update(
+            windows=_windows(), cores=os.cpu_count(), gpus=_gpus(), version=sha, version_time=when,
+            cpu=(_reg(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0", "ProcessorNameString") or "").strip() or None,
+            python=sys.version.split()[0], ffmpeg=_ffmpeg_version())
+    st = win32.STATS.snapshot()
+    vs = video.status()
+    return {**_about_cache, "host": socket.gethostname(), "ram_gb": st.get("ram_total_gb"),
+            "uptime_s": st.get("uptime_s"), "server_up_s": round(time.time() - _STARTED),
+            "displays": [{k: d[k] for k in ("name", "w", "h", "hz", "primary")} for d in win32.displays()],
+            "ips": [ip for ip in certs.local_ips() if ip != "127.0.0.1"],
+            "encoders": {"h264": vs.get("h264"), "hevc": vs.get("hevc")}, "tiles": tiles.available(),
+            "token": bool(os.environ.get("PC_API_TOKEN")), "certificate": _certificate()}
 
 
 @command("stats", "Live CPU / RAM / GPU usage.", hide=True)

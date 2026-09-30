@@ -4,15 +4,19 @@
 import { api, run, url, h, ico, toast, haptic, sheet, choose, Slider, toggle, twoTap, INFO, fmtBytes, fmtDuration,
          copyToDevice } from './app.js';
 import { hydrateIcons } from './icons.js';
-import { streamSettings } from './remote.js';
+import { resolvePlan, METHODS } from './remote.js';
 
 const root = document.getElementById('controls');
-let cmds = {}, state = {}, pending = {}, stats = {}, active = false, statsT = 0, tickT = 0;
+let cmds = {}, state = {}, pending = {}, stats = {}, active = false, statsT = 0, tickT = 0, rtt = null, about = null;
+// Chrome/Edge/Android offer a real "install" prompt; keep it for the Install as app page.
+let installPrompt = null;
+addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt = e; });
 const clockSkew = INFO.time ? INFO.time - Date.now() / 1000 : 0;
 // Soft per-icon tints (mixed toward the text colour in CSS).
 const TINT = { rocket: 'var(--orange)', link: 'var(--tint)', upload: 'var(--green)', folder: 'var(--teal)',
   clipboard: 'var(--purple)', cpu: 'var(--pink)', restart: 'var(--orange)', snow: 'var(--teal)',
-  wifi: 'var(--tint)', bluetooth: 'var(--indigo)', power: 'var(--red)' };
+  wifi: 'var(--tint)', bluetooth: 'var(--indigo)', power: 'var(--red)', info: 'var(--gray)', shield: 'var(--green)',
+  download: 'var(--tint)' };
 const KNOWN = new Set(['sleep', 'lock', 'monitor', 'screenshot', 'play', 'prev', 'next', 'mute', 'volume', 'brightness',
   'wifi', 'bluetooth', 'launch', 'sendlink', 'sendfile', 'restart', 'shutdown', 'hibernate', 'signout']);
 
@@ -131,13 +135,16 @@ function render() {
       bright == null ? h('div', { class: 'slider', style: 'opacity:.5', title: s.brightness?.error || '' },
         h('div', { class: 'lbl' }, ico('sun'), h('span', {}, 'Brightness unavailable'))) : liveSlider('brightness', 'sun', 'Brightness', bright)),
     h('div', { class: 'group-title' }, 'Connections'), radios,
-    streamSettings(),
     h('div', { class: 'group-title' }, 'Tools'), tools,
     h('div', { class: 'group-title' }, 'Power'), power,
     extra.length ? h('div', { class: 'group-title' }, 'More') : null,
     extra.length ? h('div', { class: 'card' }, extra.map(([n, m]) => row(m.icon || 'bolt', m.title, m.description,
       () => genericCommand(n, m), { strong: m.confirm && !m.params.length, danger: m.danger }))) : null,
-    footer()));
+    h('div', { class: 'group-title' }, 'About'),
+    h('div', { class: 'card' },
+      row('info', 'About this PC', INFO.host ? `${INFO.host} · system, network, server` : 'System, network, server', aboutSheet),
+      INFO.https ? row('shield', 'Secure connection', secureNow() ? 'On (HTTPS)' : 'Install the certificate for the HD stream', certSheet) : null,
+      row('download', 'Install as app', 'Full screen, from your home screen', installSheet))));
   hydrateIcons(root);
   renderStats();
   renderBanner();
@@ -156,42 +163,146 @@ function radioRow(name, icn, title, warnOff) {
   return row(icn, title, known ? null : 'Status unavailable', null, { right: sw });
 }
 
-function footer() {
-  const secure = window.isSecureContext;
-  const f = h('div', { class: 'foot' },
-    h('div', { id: 'ctl-ping' }, 'Measuring latency…'),
-    h('div', {}, secure ? 'HD stream (H.264) active · ' : 'Plain HTTP — JPEG stream · ',
-      INFO.https && !secure ? h('a', { href: INFO.https }, 'Switch to HTTPS') : null,
-      INFO.https ? h('span', {}, secure ? '' : ' · ', h('a', { href: '/ca.crt' }, 'Install certificate')) : null),
-    h('div', {}, 'Tip: Add to Home Screen for a full-screen app.'));
-  measurePing();
-  return f;
-}
-async function measurePing() {
-  try {
-    await fetch(url('/ping'));
-    const t = performance.now();
-    await fetch(url('/ping'));
-    const el = document.getElementById('ctl-ping');
-    if (el) el.textContent = `Round trip ${(performance.now() - t).toFixed(1)} ms`;
-  } catch {}
-}
+const secureNow = () => location.protocol === 'https:' && window.isSecureContext;
 
 async function pollStats() {
   if (!active) return;
-  try { stats = await run('stats'); renderStats(); } catch {}
-  statsT = setTimeout(pollStats, 3000);
+  try { stats = await run('stats'); } catch {}
+  try {  // round trip: a tiny request on the already-open connection
+    const t = performance.now();
+    await fetch(url('/ping'), { cache: 'no-store' });
+    rtt = performance.now() - t;
+  } catch { rtt = null; }
+  renderStats();
+  statsT = setTimeout(pollStats, 2000);
 }
 function renderStats() {
   const el = document.getElementById('ctl-stats');
   if (!el) return;
   const s = stats, parts = [];
-  parts.push(h('span', {}, h('i', { class: 'dot ok', style: 'margin-right:5px' }), 'Online'));
   if (s.cpu != null) parts.push(h('span', {}, 'CPU ', h('b', {}, Math.round(s.cpu) + '%')));
   if (s.ram != null) parts.push(h('span', {}, 'RAM ', h('b', {}, s.ram + '%')));
   if (s.gpu != null) parts.push(h('span', {}, 'GPU ', h('b', {}, s.gpu + '%'), s.gpu_temp ? ` ${s.gpu_temp}°` : ''));
+  if (rtt != null) parts.push(h('span', { title: 'Round trip to the PC' }, 'RTT ', h('b', {}, rtt.toFixed(1) + ' ms')));
   if (s.uptime_s) parts.push(h('span', {}, 'Up ', h('b', {}, fmtDuration(s.uptime_s))));
   el.replaceChildren(...parts);
+}
+
+// --------------------------------------------------------------- about ---
+const kv = (k, v, extra) => v == null || v === '' ? null
+  : h('div', { class: 'kv' }, h('span', { class: 'k' }, k), h('span', { class: 'v' }, v), extra || null);
+const copyBtn = (text, label = 'Copy') => h('button', { class: 'kv-copy', title: text, onclick: async e => {
+  e.stopPropagation(); haptic(5); toast((await copyToDevice(text)) ? 'Copied ' + text : 'Copy failed', { ic: 'check', ms: 1400 });
+} }, label);
+const netName = ip => /^192\.168\.|^10\./.test(ip) ? 'Local network'
+  : /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip) ? 'Tailscale'
+  : 'Other';  // VPNs, WSL / Hyper-V adapters, …
+const when = t => new Date(t * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+
+async function aboutSheet() {
+  const s = sheet({ title: 'About this PC', body: h('div', { class: 'empty' }, 'Loading…') });
+  try { about = await run('about'); } catch (e) { s.setBody(h('div', { class: 'empty' }, e.message)); return; }
+  const a = about, port = location.port || (location.protocol === 'https:' ? 443 : 80);
+  const plan = resolvePlan(), method = METHODS.find(m => m.id === plan.mode)?.name;
+  const ips = [...a.ips].sort((x, y) => (netName(x) === 'Local network' ? 0 : netName(x) === 'Tailscale' ? 1 : 2)
+                                     - (netName(y) === 'Local network' ? 0 : netName(y) === 'Tailscale' ? 1 : 2));
+  s.setBody(h('div', {},
+    h('div', { class: 'group-title' }, 'PC'),
+    h('div', { class: 'card' },
+      kv('Name', a.host), kv('Windows', a.windows), kv('Processor', a.cpu && `${a.cpu.replace(/\((R|TM)\)/g, '').replace(/\s+/g, ' ')} · ${a.cores} threads`),
+      kv('Graphics', a.gpus.join(', ')), kv('Memory', a.ram_gb && `${Math.round(a.ram_gb)} GB`),
+      ...a.displays.map(d => kv(d.name + (d.primary ? ' (main)' : ''), `${d.w} × ${d.h} · ${d.hz} Hz`)),
+      kv('Up for', a.uptime_s && fmtDuration(a.uptime_s))),
+    h('div', { class: 'group-title' }, 'This device'),
+    h('div', { class: 'card' },
+      kv('Connection', secureNow() ? 'Secure (HTTPS)' : 'Plain HTTP'),
+      kv('Stream', method && (plan.mode === 'jpeg' && a.tiles ? 'JPEG, changed areas only' : method) + (plan.alt ? ', H.264 on slow links' : '')),
+      kv('Round trip', rtt != null ? rtt.toFixed(1) + ' ms' : null)),
+    h('div', { class: 'group-title' }, 'Addresses'),
+    h('div', { class: 'card addr' }, ips.map(ip => kv(netName(ip), `${ip}:${port}`,
+      h('span', { class: 'kv-btns' }, copyBtn(`http://${ip}:${port}/`, 'http'),
+        INFO.https ? copyBtn(`https://${ip}:${port}/`, 'https') : null)))),
+    h('div', { class: 'group-title' }, 'Server'),
+    h('div', { class: 'card' },
+      kv('Version', a.version && (a.version + (a.version_time ? ` · ${when(a.version_time)}` : ''))),
+      kv('Running for', fmtDuration(a.server_up_s)),
+      kv('Access token', a.token ? 'Set' : 'Not set — anyone on your network can use this'),
+      kv('Video encoder', [...(a.encoders.h264 || []), ...(a.encoders.hevc || [])].join(', ') || 'None found'),
+      kv('JPEG', a.tiles ? 'Changed areas only' : 'Whole frames (install numpy, simplejpeg)'),
+      kv('ffmpeg', a.ffmpeg || 'Not found'), kv('Python', a.python)),
+    a.token ? null : h('div', { class: 'foot', style: 'text-align:left;margin:10px 4px 0' },
+      'To require a password, set PC_API_TOKEN in launch_remote.bat and open this page once with ?token=… .')));
+}
+
+// The certificate install guide, for the platform this page runs on.
+const PLATFORMS = [
+  ['ios', 'iPhone / iPad', [
+    'Tap Download certificate below (in Safari), then Allow.',
+    'Open Settings → General → VPN & Device Management, tap the PC Remote profile and Install.',
+    'Open Settings → General → About → Certificate Trust Settings and turn on PC Remote CA.',
+    'Tap Open secure address.']],
+  ['android', 'Android', [
+    'Tap Download certificate below.',
+    'Open Settings and search for “CA certificate” (usually Security → Encryption & credentials → Install a certificate → CA certificate).',
+    'Choose Install anyway, then pick ca.crt from Downloads.',
+    'Tap Open secure address. (Chrome trusts it; some other apps don’t.)']],
+  ['windows', 'Windows', [
+    'Download the certificate and open ca.crt.',
+    'Choose Install Certificate → Current User → Place all certificates in the following store → Browse → Trusted Root Certification Authorities.',
+    'Finish, confirm with Yes, then restart the browser. (Firefox has its own list: Settings → Privacy & Security → Certificates → View Certificates → Import.)']],
+  ['mac', 'Mac', [
+    'Download the certificate and open ca.crt; Keychain Access adds it to the login keychain.',
+    'In Keychain Access, double-click PC Remote CA → Trust → When using this certificate: Always Trust.',
+    'Close the window (enter your password), then reload the secure address.']],
+];
+function platform() {
+  const ua = navigator.userAgent;
+  if (/iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'ios';
+  if (/Android/.test(ua)) return 'android';
+  if (/Windows/.test(ua)) return 'windows';
+  if (/Macintosh/.test(ua)) return 'mac';
+  return 'windows';
+}
+async function certSheet() {
+  let pick = platform();
+  const steps = h('div'), seg = h('div', { class: 'seg', style: 'margin:0 0 10px' });
+  const draw = () => {
+    seg.replaceChildren(...PLATFORMS.map(([id, name]) => h('button', { class: id === pick ? 'on' : '', onclick: () => { pick = id; haptic(5); draw(); } }, name)));
+    steps.replaceChildren(h('ol', { class: 'steps' }, PLATFORMS.find(p => p[0] === pick)[2].map(t => h('li', {}, t))));
+  };
+  draw();
+  const fp = h('div');
+  const s = sheet({ title: 'Secure connection', body: h('div', { class: 'form' },
+    h('div', { class: 'note' + (secureNow() ? ' ok' : '') }, secureNow()
+      ? 'This page is on the secure address, so the HD stream (H.264, lowest latency and data) is available. Install the certificate on other devices the same way.'
+      : 'Browsers only allow the HD stream (H.264: lowest latency and data) on secure pages. The PC makes its own certificate; install it once on this device and the secure address opens without warnings.'),
+    h('div', { style: 'overflow-x:auto' }, seg), steps,
+    h('div', { class: 'btns' },
+      h('a', { class: 'btn gray', href: '/ca.crt', style: 'display:grid;place-items:center;text-decoration:none' }, 'Download certificate'),
+      secureNow() ? h('button', { class: 'btn', onclick: () => s.close() }, 'Done')
+        : h('a', { class: 'btn', href: INFO.https, style: 'display:grid;place-items:center;text-decoration:none' }, 'Open secure address')),
+    fp) });
+  try {
+    const c = (about ||= await run('about')).certificate;
+    if (c) fp.replaceChildren(h('div', { class: 'foot', style: 'text-align:left;margin:4px 2px 0' },
+      'To check it’s the right one, its SHA-256 fingerprint is ', h('span', { class: 'fp' }, c.sha256), `. Valid until ${when(c.expires)}.`));
+  } catch {}
+}
+
+function installSheet() {
+  const p = platform(), standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+  const how = { ios: 'In Safari, tap Share (the square with an arrow), then Add to Home Screen.',
+    android: 'In Chrome, tap ⋮ → Add to Home screen (or Install app).',
+    windows: 'In Chrome or Edge, click the install icon at the right end of the address bar (or ⋮ → Install).',
+    mac: 'In Safari, choose File → Add to Dock; in Chrome, ⋮ → Save and share → Install page as app.' }[p];
+  const s = sheet({ title: 'Install as app', body: h('div', { class: 'form' },
+    h('div', { class: 'note' + (standalone ? ' ok' : '') }, standalone
+      ? 'You’re already using the installed app.'
+      : 'Opened from your home screen, the remote runs full screen without the browser’s bars, like a native app.'),
+    standalone ? null : h('div', { style: 'font-size:15px;line-height:1.45' }, how),
+    installPrompt && !standalone ? h('button', { class: 'btn', onclick: async () => {
+      installPrompt.prompt(); await installPrompt.userChoice.catch(() => {}); installPrompt = null; s.close();
+    } }, 'Install') : null) });
 }
 function renderBanner() {
   const el = document.getElementById('ctl-banner');

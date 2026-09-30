@@ -64,16 +64,18 @@ def now_ms() -> float:
 def tuning(q: float) -> dict:
     """The quality <-> latency/fps slider, q = 0 (fastest) .. 1 (sharpest).
 
-    Faster: every display refresh, rendered slightly below the on-screen
-    size, frames capped near one frame-time of bitrate (so nothing queues),
-    the quickest encoder preset. Sharper: fewer fps, always full resolution,
-    lower (better) constant-quality target, bigger frames allowed (a
-    detailed frame may take a few frame-times to arrive), slower presets
-    that compress better."""
+    Every level runs at the display's refresh rate: more frames always
+    look better, and the bitrate (or JPEG quality) adapts to the link.
+    Faster: rendered slightly below the on-screen size, frames capped near
+    one frame-time of bitrate (so nothing queues), the quickest encoder
+    preset. Sharper: always full resolution, a lower (better)
+    constant-quality target, bigger frames allowed (a detailed frame may
+    take a few frame-times to arrive), slower presets that compress
+    better."""
     q = min(1.0, max(0.0, q))
     return {
         "q": round(q, 2),
-        "fps_cap": 240 if q <= 0.5 else 60 if q <= 0.8 else 30,
+        "fps_cap": 240,
         "scale": 0.75 if q < 0.2 else 1.0,
         "native": q >= 0.75,
         "cq": round(27 - 11 * q),
@@ -712,7 +714,9 @@ class StreamSession:
         bw = max((b for ts, b in self._bw if t - ts < 2000), default=0)
         while self._sent_log and t - self._sent_log[0][0] > 250:
             self._sent_log.popleft()
-        if not bw or sum(b for _, b in self._sent_log) * 8 < bw * 0.75 * 0.25:
+        # the link's room, and the viewer's own bitrate limit (if any)
+        rate = min(bw * 0.75 if bw else float("inf"), self._max_bitrate if self._max_bitrate < MAX_BITRATE else float("inf"))
+        if rate == float("inf") or sum(b for _, b in self._sent_log) * 8 < rate * 0.25:
             return 0.0
         return max(0.002, (250 - (t - self._sent_log[0][0])) / 1000)
 

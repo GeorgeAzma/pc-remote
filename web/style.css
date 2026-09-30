@@ -72,18 +72,19 @@ body.kb-open .tabbar { display: none; }
 .tabbar button span { font-size: 24px; }
 .tabbar button.active { color: var(--tint); }
 .tabbar .tabs-hide { flex: none; width: 44px; font-size: 18px; color: var(--label3); }
-/* Grab bars (a plain ribbon, like a sheet's grabber) that fold a panel away / bring it back */
-.grip { position: absolute; z-index: 6; opacity: .3; transition: opacity .15s; touch-action: none; }
+/* Grab bars that fold a panel away / bring it back: a soft ribbon in the
+   panel's own colour, a little lighter, so it reads as part of the panel */
+.grip { position: absolute; z-index: 6; touch-action: none; --grip: color-mix(in srgb, var(--pad) 84%, var(--label)); }
 .grip.v { cursor: ew-resize; } .grip.h { cursor: ns-resize; }
-.grip.dragging { opacity: .85; }
-.grip::after { content: ""; position: absolute; border-radius: 2px; background: var(--label); transition: transform .15s; }
-.grip.v { width: 22px; height: 80px; margin: -40px 0 0 -11px; }
-.grip.v::after { left: 9px; top: 20px; width: 4px; height: 40px; }
-.grip.h { width: 80px; height: 22px; margin: -11px 0 0 -40px; }
-.grip.h::after { top: 9px; left: 20px; height: 4px; width: 40px; }
-.grip:hover, .grip:focus-visible { opacity: .6; }
-.grip.v:hover::after { transform: scaleY(1.15); } .grip.h:hover::after { transform: scaleX(1.15); }
-.grip:active { opacity: .8; }
+.grip::after { content: ""; position: absolute; border-radius: 4px; background: var(--grip);
+  transition: transform .15s, background .15s; }
+.grip.v { width: 24px; height: 84px; margin: -42px 0 0 -12px; }
+.grip.v::after { left: 8px; top: 18px; width: 7px; height: 48px; }
+.grip.h { width: 84px; height: 24px; margin: -12px 0 0 -42px; }
+.grip.h::after { top: 8px; left: 18px; height: 7px; width: 48px; }
+.grip:hover, .grip:focus-visible, .grip.dragging { --grip: color-mix(in srgb, var(--pad) 72%, var(--label)); }
+.grip.v:hover::after, .grip.v.dragging::after { transform: scaleY(1.15); }
+.grip.h:hover::after, .grip.h.dragging::after { transform: scaleX(1.15); }
 .tabs-handle { cursor: pointer !important; display: none; position: fixed; left: 50%; top: auto; bottom: var(--safe-b); margin: 0 0 0 -40px; z-index: 20; }
 body.tabs-off .tabs-handle { display: block; }
 body.kb-open .tabs-handle { display: none; }
@@ -154,7 +155,8 @@ body.theater { background: #000; }
 body.theater .remote { padding: 0; }
 body.theater.tabs-off #app { padding-bottom: var(--safe-b); }
 body.theater.tabs-off .view { bottom: var(--safe-b); }
-body.theater .grip::after { background: #fff; }  /* over the picture */
+body.theater .grip { --grip: rgba(255,255,255,.16); }  /* over the picture */
+body.theater .grip:hover, body.theater .grip.dragging { --grip: rgba(255,255,255,.3); }
 .pad-hint { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
   justify-content: center; gap: 4px; color: var(--label3); font-size: 12px; pointer-events: none; transition: opacity .6s; }
 .pad-hint.gone { opacity: 0; }
@@ -355,3 +357,18 @@ textarea.input { height: auto; min-height: 88px; padding: 10px 12px; resize: ver
   .controls { padding: 16px max(16px, calc(50% - 360px)) 32px; }
   .remote { padding: 12px; gap: 10px; }
 }
+
+/* About / certificate pages */
+.kv { display: flex; align-items: baseline; gap: 12px; padding: 11px 14px; font-size: 14.5px; }
+.kv + .kv { border-top: .5px solid var(--sep); }
+.kv .k { color: var(--label2); flex: none; min-width: 84px; }
+.kv .v { flex: 1; text-align: right; word-break: break-word; font-variant-numeric: tabular-nums; }
+.kv-copy { flex: none; color: var(--tint); font-size: 13.5px; font-weight: 600; padding: 2px 0 2px 4px; }
+.kv-btns { flex: none; display: flex; gap: 10px; }
+.addr .kv .v { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.form > * { min-width: 0; }  /* long content wraps instead of widening the sheet */
+.fp { font: 11.5px var(--mono); word-break: break-all; }
+.note { background: var(--bg2); border-radius: 12px; padding: 12px 14px; font-size: 14px; line-height: 1.45; color: var(--label2); }
+.note.ok { box-shadow: inset 3px 0 0 var(--green); }
+.steps { margin: 0; padding: 0 0 0 22px; display: grid; gap: 9px; font-size: 15px; line-height: 1.4; }
+.steps li::marker { color: var(--label3); font-weight: 600; }
