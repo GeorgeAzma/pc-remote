@@ -242,7 +242,7 @@ def say(text: str = ""):
 | `win32.py` | ctypes: input injection, clipboard, cursor shapes, displays, audio, stats |
 | `wsock.py` | minimal WebSocket implementation |
 | `certs.py` | local CA and server certificate for HTTPS |
-| `web/` | the app: `remote.js`, `term.js` (VT emulator), `controls.js`, `app.js` |
+| `web/` | the app: `remote.js`, `term.js` (VT emulator), `controls.js`, `monitor.js` (System tab), `app.js` |
 
 ## Run at Windows startup (elevated)
 
