@@ -312,6 +312,7 @@ function renderAcc() {
 }
 
 // ----------------------------------------------------------- toolbar ---
+const SHORT = { ps: 'PS', pwsh: 'PS 7', cmd: 'CMD', wsl: 'WSL' };  // shell picker labels (full name on hover)
 function renderShells() {
   const seg = $('term-shells');
   const shells = INFO.shells?.length ? INFO.shells : [{ id: 'ps', name: 'PowerShell' }];
@@ -323,7 +324,7 @@ function renderShells() {
     setSetting('shell', shell);
     renderShells();
     connect();
-  } }, s.name.replace('Command Prompt', 'CMD').replace('PowerShell 7', 'pwsh'))));
+  }, title: s.name }, SHORT[s.id] || s.name)));
 }
 function font(d) {
   setSetting('termFont', Math.min(22, Math.max(9, settings.termFont + d)));
