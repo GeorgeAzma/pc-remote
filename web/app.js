@@ -54,6 +54,7 @@ const DEFAULTS = {
   stats: false, haptics: true, termFont: 13, tab: 'remote', recents: [], shell: 'ps',
   hidePanel: false, hideTabs: false, panelW: 0, padH: 0,  // 0 = automatic size
   maxMbps: 0,  // stream bitrate limit, 0 = none
+  pins: [],  // shortcuts shown in the key bar
 };
 export const settings = { ...DEFAULTS, ...(JSON.parse(store('settings') || '{}')) };
 delete settings.fps;    // superseded by the Speed <-> Quality slider (+ display refresh)

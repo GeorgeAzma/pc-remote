@@ -45,6 +45,8 @@ const P = {
   hand: '<path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V11m0-1.5V4a1.5 1.5 0 0 1 3 0v6.5m0-4a1.5 1.5 0 0 1 3 0v6m0-3.5a1.5 1.5 0 0 1 3 0V15a7 7 0 0 1-7 7h-1a7 7 0 0 1-5.6-2.8L3.2 16a1.6 1.6 0 0 1 2.5-2L8 16"/>',
   bolt: '<path d="M13 2.5 4.5 13.5h6.5l-1 8 8.5-11h-6.5Z"/>',
   chevdown: '<path d="m6 9.5 6 6 6-6"/>',
+  pin: '<path d="M9 3.5h6M10 3.5v5.2l-3.5 4.3h11L14 8.7V3.5M12 13v7.5"/>',
+  pinned: '<path d="M9 3.5h6M10 3.5v5.2l-3.5 4.3h11L14 8.7V3.5Z" fill="currentColor"/><path d="M12 13v7.5"/>',
 };
 const cache = new Map();
 export function icon(name) {

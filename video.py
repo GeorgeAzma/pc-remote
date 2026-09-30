@@ -511,8 +511,14 @@ class StreamSession:
             w, h = max(2, int(d["w"] * s) & ~1), max(2, int(d["h"] * s) & ~1)
         enc = ("tiles" if tiles.available() and time.monotonic() - _bad_encoders.get("tiles", -1e9) > 60
                else "mjpeg") if mjpeg else encoders(MODES[mode][0])[0]
-        if not ((w, h) == (d["w"], d["h"]) and enc.endswith("_nvenc")):
-            fps = min(fps, 120)  # CPU scaling costs ~1 core per 100 fps
+        if fps > 120 and enc != "tiles" and not ((w, h) == (d["w"], d["h"]) and enc.endswith("_nvenc")):
+            # Shrinking runs on the CPU here (~1 core per 100 fps). With NVENC,
+            # encode at native size instead: zero-copy, the GPU carries the
+            # extra frames. (Tiled JPEG shrinks on the GPU: no limit.)
+            if enc.endswith("_nvenc"):
+                w, h = d["w"], d["h"]
+            else:
+                fps = 120
         spec = Spec(mode, d, w, h, fps, encoder=enc, t=t)
         if mjpeg:
             return spec

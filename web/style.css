@@ -108,7 +108,8 @@ body.theater.theater-b .tabs-handle { display: none; }
 .switch i { position: absolute; inset: 0; border-radius: 16px; background: var(--fill); transition: background .2s; }
 .switch i::after { content: ""; position: absolute; left: 2px; top: 2px; width: 27px; height: 27px; border-radius: 50%;
   background: #fff; box-shadow: 0 3px 8px rgba(0,0,0,.15), 0 1px 1px rgba(0,0,0,.16); transition: transform .22s cubic-bezier(.3,.7,.4,1.1); }
-.switch input:checked + i { background: var(--green); }
+/* on: the app's blue, muted toward the surface so it doesn't shout */
+.switch input:checked + i { background: color-mix(in srgb, var(--tint) 58%, var(--bg4)); }
 .switch input:checked + i::after { transform: translateX(20px); }
 .switch.unknown i { opacity: .45; }
 
@@ -372,3 +373,23 @@ textarea.input { height: auto; min-height: 88px; padding: 10px 12px; resize: ver
 .note.ok { box-shadow: inset 3px 0 0 var(--green); }
 .steps { margin: 0; padding: 0 0 0 22px; display: grid; gap: 9px; font-size: 15px; line-height: 1.4; }
 .steps li::marker { color: var(--label3); font-weight: 600; }
+
+/* Shortcut list: the row sends, the pin adds it to / removes it from the key bar */
+.list-row.sc { padding: 0 4px 0 0; gap: 0; }
+.sc-go { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 10px 8px 10px 12px; min-height: 46px; text-align: left; }
+.sc-go:active { background: var(--fill2); }
+.sc-pin { flex: none; width: 40px; height: 40px; display: grid; place-items: center; font-size: 18px; color: var(--label3); border-radius: 10px; }
+.sc-pin.on { color: var(--tint); }
+.sc-pin:active { background: var(--fill2); }
+.sc-title { padding: 10px 14px 4px; font-size: 12px; font-weight: 600; letter-spacing: .3px; text-transform: uppercase; color: var(--label3); }
+.sc-title + .list-row::before { display: none; }
+
+/* Gestures & keys guide */
+.gesture { display: flex; align-items: center; gap: 14px; padding: 11px 14px; }
+.gesture + .gesture { border-top: .5px solid var(--sep); }
+.gesture b { font-weight: 600; font-size: 15px; }
+.gesture .d { color: var(--label2); font-size: 13.5px; line-height: 1.35; margin-top: 1px; }
+.gfx { flex: none; width: 44px; height: 44px; border-radius: 11px; background: var(--pad); border: .5px solid var(--sep);
+  display: grid; place-items: center; color: var(--label2); }
+.gfx svg { width: 44px; height: 44px; }
+.keycap { font-size: 13px; font-weight: 600; color: var(--label); background: var(--bg3); box-shadow: inset 0 -2px 0 rgba(0,0,0,.25); }

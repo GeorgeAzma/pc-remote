@@ -84,7 +84,8 @@ panel back. The ⌄ at the end of the tab bar folds it down to a similar bar.
 The picture still takes taps and your physical keyboard (or works as the
 trackpad, see *Touching the screen* in Settings).
 
-Pointer speed, acceleration, scroll speed and direction are in ⚙ Settings.
+Pointer speed, acceleration, scroll speed and direction are in ⚙ Settings,
+along with *Gestures & keys*, an illustrated guide to all of these.
 Pointer motion uses a velocity curve: slow strokes are precise, and a quick
 flick crosses the whole screen.
 
@@ -92,7 +93,8 @@ flick crosses the whole screen.
 you type, including autocorrect, swipe typing and dictation. `Ctrl`, `Alt`,
 `⇧` and `⊞` are sticky: tap one, then a key (tap twice to lock it). ⌘ opens
 a searchable shortcut list, where you can also type any combo such as
-`ctrl+shift+esc`; the combos you use appear in the key bar. On a computer,
+`ctrl+shift+esc`. Tap the pin next to a shortcut to add it to the key bar;
+hold a key there to remove it again. On a computer,
 click the screen image to send your physical keyboard straight to the PC.
 
 ## How the stream works
@@ -108,7 +110,9 @@ NVENC H.264: ultra-low-latency, no B-frames, infinite GOP, constant quality with
 
 - The resolution matches the picture's size on your screen in device
   pixels (times the zoom level), capped at the monitor's size. The frame
-  rate follows your display's refresh rate.
+  rate follows your display's refresh rate (up to 240). Above 120 fps a
+  shrunk H.264 picture would cost a CPU core per 100 fps, so NVENC then
+  encodes at native size instead (zero-copy, on the GPU).
 - Every frame is acknowledged. Queueing delay, measured as the minimum
   over 150 ms, and a per-frame capacity estimate drive the bitrate down
   fast when the link is saturated, and back up when it recovers. The

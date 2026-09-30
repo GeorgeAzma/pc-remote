@@ -986,8 +986,17 @@ function renderStrip() {
     } }, MOD_LABEL[m]));
   }
   kids.push(h('span', { class: 'chip sep' }));
-  for (const c of settings.recents.slice(0, 5)) kids.push(h('button', { class: 'chip recent', onclick: () => { haptic(6); sendCombo(c); } }, prettyCombo(c)));
-  if (settings.recents.length) kids.push(h('span', { class: 'chip sep' }));
+  // Shortcuts pinned from the ⌘ list; hold one to unpin it.
+  for (const c of settings.pins) {
+    const b = h('button', { class: 'chip recent', title: shortcutName(c) || prettyCombo(c) }, prettyCombo(c));
+    let holdT = 0, held = false;
+    b.addEventListener('pointerdown', () => { held = false; holdT = setTimeout(() => { held = true; haptic(15); togglePin(c); }, 550); });
+    for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) b.addEventListener(ev, () => clearTimeout(holdT));
+    b.addEventListener('click', () => { if (!held) { haptic(6); sendCombo(c); } });
+    b.addEventListener('contextmenu', e => e.preventDefault());
+    kids.push(b);
+  }
+  if (settings.pins.length) kids.push(h('span', { class: 'chip sep' }));
   for (const [label, name] of KEYS) kids.push(h('button', { class: 'chip', onclick: () => { haptic(5); sendKey(name); } }, label));
   strip.replaceChildren(...kids);
   renderMods();
@@ -997,10 +1006,16 @@ const prettyCombo = c => c.split('+').map(p => ({ ctrl: 'Ctrl', alt: 'Alt', shif
   (p.length === 1 ? p.toUpperCase() : p[0].toUpperCase() + p.slice(1))).join('+');
 function sendCombo(c) {
   input.send({ t: 'combo', s: c });
-  const r = [c, ...settings.recents.filter(x => x !== c)].slice(0, 8);
-  setSetting('recents', r);
-  renderStrip();
+  setSetting('recents', [c, ...settings.recents.filter(x => x !== c)].slice(0, 8));
 }
+function togglePin(c) {
+  const on = !settings.pins.includes(c);
+  setSetting('pins', on ? [...settings.pins, c] : settings.pins.filter(x => x !== c));
+  toast(on ? `${prettyCombo(c)} added to the key bar` : `${prettyCombo(c)} removed from the key bar`, { ic: on ? 'pinned' : 'pin', ms: 1400 });
+  renderStrip();
+  layout();
+}
+const shortcutName = c => SHORTCUTS.find(x => x[1] === c)?.[0];
 
 // ---- live typing field: every keystroke goes to the PC immediately ----
 // The field keeps a zero-width sentinel so Backspace always has something
@@ -1087,20 +1102,33 @@ function shortcutSheet() {
   const list = h('div', { class: 'card' });
   const s = sheet({ title: 'Shortcuts', body: h('div', { class: 'form' }, q, list) });
   const fire = c => { haptic(8); sendCombo(c); s.close(); toast(prettyCombo(c), { ic: 'command', ms: 900 }); };
+  // A row sends its shortcut; the pin on the right adds it to (or removes it from) the key bar.
+  const line = (n, c, icn) => {
+    const pinned = settings.pins.includes(c), tip = pinned ? 'Remove from the key bar' : 'Add to the key bar';
+    return h('div', { class: 'list-row sc' },
+      h('button', { class: 'sc-go', onclick: () => fire(c) },
+        icn ? ico(icn, 'ic') : null, h('span', { class: 'nm' }, n), h('span', { class: 'k' }, prettyCombo(c))),
+      h('button', { class: 'sc-pin' + (pinned ? ' on' : ''), 'aria-label': tip, title: tip,
+        onclick: () => { haptic(6); togglePin(c); render(); } }, ico(pinned ? 'pinned' : 'pin')));
+  };
+  const group = (title, rows) => rows.length ? [h('div', { class: 'sc-title' }, title), ...rows] : [];
   const render = () => {
     const t = q.value.trim().toLowerCase();
-    const items = [...settings.recents.map(c => [SHORTCUTS.find(x => x[1] === c)?.[0] || 'Recent', c, true]),
-                   ...SHORTCUTS.filter(x => !settings.recents.includes(x[1])).map(x => [...x, false])]
-      .filter(([n, c]) => !t || n.toLowerCase().includes(t) || c.includes(t.replace(/\s/g, '')));
-    const rows = items.slice(0, 60).map(([n, c, r]) => h('button', { class: 'list-row', onclick: () => fire(c) },
-      r ? ico('restart', 'ic') : null, h('span', { class: 'nm' }, n), h('span', { class: 'k' }, prettyCombo(c))));
-    if (/^[a-z0-9]+(\+[a-z0-9.,/;'`[\]\\=-]+)+$|^f\d\d?$/.test(t) && !items.some(x => x[1] === t))
-      rows.unshift(h('button', { class: 'list-row', onclick: () => fire(t) }, ico('command', 'ic'),
-        h('span', { class: 'nm' }, 'Send'), h('span', { class: 'k' }, prettyCombo(t))));
+    const hit = (n, c) => !t || n.toLowerCase().includes(t) || c.includes(t.replace(/\s/g, ''));
+    const named = c => shortcutName(c) || prettyCombo(c);
+    const pins = settings.pins.filter(c => hit(named(c), c));
+    const recent = settings.recents.filter(c => !settings.pins.includes(c) && hit(named(c), c)).slice(0, 5);
+    const rest = SHORTCUTS.filter(([n, c]) => !settings.pins.includes(c) && !recent.includes(c) && hit(n, c));
+    const rows = [...group('In the key bar', pins.map(c => line(named(c), c))),
+                  ...group('Recent', recent.map(c => line(named(c), c, 'restart'))),
+                  ...group(t ? 'Matches' : 'All shortcuts', rest.slice(0, 60).map(([n, c]) => line(n, c)))];
+    if (/^[a-z0-9]+(\+[a-z0-9.,/;'`[\]\\=-]+)+$|^f\d\d?$/.test(t) && ![...settings.pins, ...SHORTCUTS.map(x => x[1])].includes(t))
+      rows.unshift(line('Send', t, 'command'));
     list.replaceChildren(...(rows.length ? rows : [h('div', { class: 'empty' }, 'No match')]));
+    hydrateIcons(list);
   };
   q.addEventListener('input', render);
-  q.addEventListener('keydown', e => { if (e.key === 'Enter') { const b = list.querySelector('.list-row'); if (b) b.click(); } });
+  q.addEventListener('keydown', e => { if (e.key === 'Enter') { const b = list.querySelector('.sc-go'); if (b) b.click(); } });
   render();
   if (matchMedia('(pointer: fine)').matches) setTimeout(() => q.focus(), 250);
 }
@@ -1204,10 +1232,54 @@ function settingsSheet() {
       slRow('Scroll speed', 'scroll', 0.3, 3, 0.05, x),
       swRow('Natural scrolling', 'natural', 'Content follows your fingers'),
       segRow('Touching the screen', 'touch', [['direct', 'Clicks'], ['trackpad', 'Trackpad']]),
-      swRow('Haptics', 'haptics')),
-    streamSettings(),
-    h('div', { class: 'foot' },
-      `Gestures: tap = click · two-finger tap = right-click · hold or tap-then-drag = drag · two fingers = scroll · three-finger tap = middle-click · three-finger swipe ↑ task view, ↓ desktop, ←/→ switch app · pinch the screen to zoom`)) });
+      swRow('Haptics', 'haptics'),
+      h('button', { class: 'list-row', onclick: () => { haptic(5); gestureSheet(); } },
+        ico('hand', 'ic'), h('span', { class: 'nm' }, 'Gestures & keys'), ico('chev', 'meta'))),
+    streamSettings()) });
+}
+
+// A little finger diagram: n dots on a pad, plus the motion.
+function fingers(n, motion = '') {
+  const dots = { 1: [[22, 25]], 2: [[16, 25], [28, 25]], 3: [[11, 26], [22, 23], [33, 26]] }[n];
+  const path = {
+    drag: 'M22 15V7m-3.5 3.5L22 7l3.5 3.5',
+    scroll: 'M22 14V6m-3 3 3-3 3 3M22 36v6m-3-3 3 3 3-3',
+    swipe: 'M9 39h26m-3-3 3 3-3 3M12 36l-3 3 3 3M22 14V6m-3 3 3-3 3 3',
+    pinch: 'M9 13 4 8m0 4V8h4M35 13l5-5m0 4V8h-4',
+  }[motion] || '';
+  return h('span', { class: 'gfx', html: `<svg viewBox="0 0 44 44" aria-hidden="true">
+    ${dots.map(([x, y]) => `<circle cx="${x}" cy="${y}" r="4.6" fill="currentColor"/>`).join('')}
+    ${motion === 'hold' ? `<circle cx="${dots[0][0]}" cy="${dots[0][1]}" r="9" fill="none" stroke="currentColor" stroke-width="1.6" opacity=".5"/>` : ''}
+    ${path ? `<path d="${path}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" opacity=".7"/>` : ''}
+  </svg>` });
+}
+const keycap = t => h('span', { class: 'gfx keycap' }, t);
+function gestureSheet() {
+  const item = (gfx, title, text) => h('div', { class: 'gesture' }, gfx, h('div', {}, h('b', {}, title), h('div', { class: 'd' }, text)));
+  const group = (title, items) => [h('div', { class: 'group-title' }, title), h('div', { class: 'card' }, items)];
+  sheet({ title: 'Gestures & keys', body: h('div', {},
+    ...group('Trackpad', [
+      item(fingers(1), 'Tap', 'Click. Tap twice to double-click.'),
+      item(fingers(2), 'Two-finger tap', 'Right-click.'),
+      item(fingers(3), 'Three-finger tap', 'Middle-click.'),
+      item(fingers(1, 'hold'), 'Hold, or tap then drag', 'Drag: holds the left button down.'),
+      item(fingers(2, 'scroll'), 'Two-finger drag', 'Scroll. Flick to keep it gliding.'),
+      item(fingers(3, 'swipe'), 'Three-finger swipe', 'Up: Task view. Down: show desktop. Left / right: switch app.')]),
+    ...group('Picture', [
+      item(fingers(1), 'Tap', 'Click exactly there.'),
+      item(fingers(1, 'hold'), 'Hold', 'Right-click there.'),
+      item(fingers(1, 'drag'), 'Drag', 'Drag there.'),
+      item(fingers(2, 'pinch'), 'Pinch', 'Zoom in; the stream gets sharper as you zoom. Tap 1× to zoom back out.'),
+      h('div', { class: 'foot', style: 'text-align:left;margin:0;padding:8px 14px 12px' },
+        'Prefer the picture to act as a trackpad? Settings → Touching the screen → Trackpad.')]),
+    ...group('Keyboard', [
+      item(keycap('Aa'), 'Type on PC', 'Everything you type goes to the PC as you type, including autocorrect, swipe typing and dictation.'),
+      item(keycap('Ctrl'), 'Ctrl, Alt, ⇧, ⊞', 'Tap for the next key only; tap twice to keep it held.'),
+      item(keycap('⌘'), 'Shortcuts', 'Search or type any combo. Tap the pin to add it to the key bar; hold a key there to remove it.'),
+      item(keycap('⌨'), 'On a computer', 'Click the picture, then type: your keyboard goes straight to the PC.')]),
+    ...group('Panel', [
+      item(fingers(1, 'drag'), 'Grab bar', 'Drag it to resize the panel. Tap it to hide the panel and go full screen.'),
+      item(keycap('⌄'), 'Tab bar', 'The ⌄ at its end folds it away; tap the bar at the bottom to bring it back.')])) });
 }
 $('btn-settings').addEventListener('click', () => { haptic(5); settingsSheet(); });
 
