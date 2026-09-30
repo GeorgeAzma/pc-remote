@@ -1302,7 +1302,7 @@ function gestureSheet() {
       item(keycap('⌨'), 'On a computer', 'Click the picture, then type: your keyboard goes straight to the PC.')]),
     ...group('Panel', [
       item(fingers(1, 'drag'), 'Grab bar', 'Drag it to resize the panel. Tap it to hide the panel and go full screen.'),
-      item(keycap('⋯'), 'Views', 'Switch between Remote, Terminal and Controls with the three icons at the top.')])) });
+      item(keycap('⋯'), 'Views', 'Switch between Remote, Terminal, Controls and System with the icons at the top.')])) });
 }
 $('btn-settings').addEventListener('click', () => { haptic(5); settingsSheet(); });
 

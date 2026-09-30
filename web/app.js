@@ -307,7 +307,8 @@ export function showTab(name) {
 // Switching views: a small segmented control each view keeps in its own top
 // bar (over the picture, the terminal's bar, the Controls header), so it
 // takes no room of its own.
-const TABS = [['remote', 'trackpad', 'Remote'], ['term', 'terminal', 'Terminal'], ['controls', 'controls', 'Controls']];
+const TABS = [['remote', 'trackpad', 'Remote'], ['term', 'terminal', 'Terminal'], ['controls', 'controls', 'Controls'],
+              ['monitor', 'pulse', 'System']];
 export function tabSwitch(el = h('div', { class: 'tabsw' })) {
   el.setAttribute('role', 'tablist');
   el.replaceChildren(...TABS.map(([t, ic, name]) => h('button', {
@@ -345,10 +346,12 @@ async function boot() {
   document.querySelectorAll('[data-tabs]').forEach(el => tabSwitch(el));
   try { INFO = await api('/api/info'); } catch (e) { if (!/Token/.test(e.message)) toast('Server unreachable', { err: true }); }
   document.title = (INFO.host || 'PC') + ' · Remote';
-  const [remote, term, controls] = await Promise.all([import('./remote.js'), import('./term.js'), import('./controls.js')]);
+  const [remote, term, controls, monitor] = await Promise.all([import('./remote.js'), import('./term.js'), import('./controls.js'),
+                                                            import('./monitor.js')]);
   registerView('remote', remote);
   registerView('term', term);
   registerView('controls', controls);
+  registerView('monitor', monitor);
   showTab(settings.tab);
 }
 boot();

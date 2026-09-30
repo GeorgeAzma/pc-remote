@@ -392,6 +392,8 @@ textarea.input { height: auto; min-height: 88px; padding: 10px 12px; resize: ver
 @media (min-width: 600px) { .sheet.wide { max-width: min(980px, calc(100vw - 32px)); } }
 .mon { container-type: inline-size; }
 @container (min-width: 640px) { .mon-grid { grid-template-columns: 1fr 1fr; align-items: start; } .mon-grid > :first-child { grid-column: 1 / -1; } }
+@container (min-width: 1000px) { .mon-grid { grid-template-columns: repeat(3, 1fr); } .mon-grid > :first-child { grid-column: span 2; } }
+@media (min-width: 900px) { .controls.monitor { padding: 16px max(16px, calc(50% - 600px)) 32px; } }
 .mon-card { background: var(--bg2); border-radius: var(--r); padding: 12px 14px 14px; display: grid; gap: 10px; min-width: 0; align-content: start; }
 .mon-k { font-size: 12px; font-weight: 600; letter-spacing: .3px; text-transform: uppercase; color: var(--label3); }
 .mon-head { display: flex; align-items: flex-end; gap: 14px; margin-top: -4px; }

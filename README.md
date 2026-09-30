@@ -17,14 +17,16 @@ browser on the same network (or over Tailscale).
   either way, clipboard sync, running apps, and timed shutdown/restart.
   Sleep, lock and power actions take two taps (the first turns the button
   red); press and hold them for timers. The header shows CPU, RAM, GPU and
-  the live round trip to the PC; tap it (or Tools → *System monitor*) for
-  every core's load and clock (performance cores drawn bigger than efficiency
-  cores), memory, GPU (VRAM, temperature, power, clocks, fan, encoder),
-  disks, network and the busiest apps, with a minute of history. It updates
-  20 times a second (pushed over a WebSocket; the busiest apps once a second),
-  and the server only samples while it's open. **About** at the bottom has the PC's
-  details, its addresses (with copy buttons), the certificate install guide
-  and how to install the remote as an app.
+  the live round trip to the PC; tap it to open the System tab. **About**
+  at the bottom has the PC's details, its addresses (with copy buttons),
+  the certificate install guide and how to install the remote as an app.
+- **System**: every core's load and clock (performance cores drawn bigger
+  than efficiency cores), memory, GPU (VRAM, temperature, power, clocks,
+  fan, encoder), disks, network and the busiest apps, with a minute of
+  history. It updates 20 times a second (pushed over a WebSocket; the
+  busiest apps once a second), and the server only samples while it's open.
+  While it's showing, the phone's screen stays on (on the HTTPS address), so
+  it works as a second screen.
 
 ## Setup
 
@@ -87,9 +89,9 @@ and text field) slides away and the browser goes full screen. The bar then
 waits at the screen edge; tap it, drag it out, or press Esc to bring the
 panel back.
 
-Switch between Remote, Terminal and Controls with the three small icons at
+Switch between Remote, Terminal, Controls and System with the small icons at
 the top of each view: over the picture, in the terminal's bar and in the
-Controls header. They take no room of their own.
+Controls and System headers. They take no room of their own.
 The picture still takes taps and your physical keyboard (or works as the
 trackpad, see *Touching the screen* in Settings).
 
