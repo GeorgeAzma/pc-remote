@@ -27,7 +27,7 @@ export function wsUrl(path, q = {}) {
 export async function api(path, body) {
   const res = await fetch(url(path), body === undefined ? {} : {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  if (res.status === 401) { askToken(); throw new Error('Token required'); }
+  if (res.status === 401) { signIn(); throw new Error('Sign in required'); }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data;
@@ -35,17 +35,31 @@ export async function api(path, body) {
 export async function run(cmd, args = {}) {
   return (await api('/' + cmd, args)).result;
 }
+/** The key a signed-in device holds (it changes when all devices are signed out). */
+export function setToken(k) { TOKEN = k; store('token', k); }
 let asking = false;
-function askToken() {
+function signIn() {
   if (asking) return;
   asking = true;
-  const inp = h('input', { class: 'input', type: 'password', placeholder: 'PC_API_TOKEN', autocomplete: 'current-password' });
-  const s = sheet({ title: 'Token required', body: h('div', { class: 'form' },
-    h('div', { style: 'color:var(--label2);font-size:14px' }, 'This PC requires the token set in launch_remote.bat.'),
-    inp, h('button', { class: 'btn', onclick: () => { store('token', inp.value.trim()); location.reload(); } }, 'Continue')),
+  const inp = h('input', { class: 'input', type: 'password', placeholder: 'Access code or password',
+    autocomplete: 'current-password', autocapitalize: 'off', spellcheck: 'false', enterkeyhint: 'go' });
+  const go = async () => {
+    let r, d = {};
+    try {
+      r = await fetch(new URL('/api/login', location.origin), { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: inp.value }) });
+      d = await r.json().catch(() => ({}));
+    } catch { toast('PC unreachable', { err: true, always: true }); return; }
+    if (r.ok && d.key) { setToken(d.key); location.reload(); return; }
+    toast(d.error || 'Sign-in failed', { err: true, always: true });
+    inp.select();
+  };
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+  sheet({ title: 'Sign in', body: h('div', { class: 'form' },
+    h('div', { class: 'note' }, 'Enter the access code or your password. On the PC, PC Remote in the Start menu shows the code and a QR code; a signed-in device can show the QR code too (Controls \u2192 About \u2192 Sign-in & devices).'),
+    inp, h('button', { class: 'btn', onclick: go }, 'Sign in')),
     onClose: () => { asking = false; } });
   setTimeout(() => inp.focus(), 300);
-  return s;
 }
 
 // ------------------------------------------------------------ settings ---
@@ -105,7 +119,8 @@ export function fmtDuration(s) {
 }
 
 let toastT = 0;
-export function toast(msg, { err = false, ic = null, ms = 1800 } = {}) {
+export function toast(msg, { err = false, ic = null, ms = 1800, always = false } = {}) {
+  if (err && asking && !always) return;  // while signing in, every call fails the same way: the sheet says it
   const t = document.getElementById('toast');
   t.className = 'toast show' + (err ? ' err' : '');
   t.replaceChildren(...(ic ? [ico(ic)] : []), h('span', {}, msg));

@@ -442,3 +442,8 @@ textarea.input { height: auto; min-height: 88px; padding: 10px 12px; resize: ver
 .mon-proc .cpu { color: var(--label); font-weight: 600; min-width: 44px; }
 .mon-proc .mon-bar { grid-column: 1 / -1; }
 .mon-foot { text-align: center; font-size: 12px; color: var(--label3); margin: 14px 0 4px; }
+
+/* Sign-in & pairing */
+.qr { width: min(240px, 70vw); margin: 4px auto; border-radius: 14px; overflow: hidden; background: #fff; padding: 2px; }
+.qr svg { display: block; width: 100%; height: auto; }
+.code { flex: 1; font: 600 22px/1.2 var(--mono); letter-spacing: 2px; }

@@ -22,6 +22,7 @@ Environment:
 """
 import win32  # noqa: I001 - first: sets per-monitor DPI awareness before any metrics call
 
+import faulthandler
 import hmac
 import ipaddress
 import json
@@ -36,6 +37,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
+import auth
 import certs
 import commands
 import paths
@@ -144,13 +146,22 @@ class Handler(BaseHTTPRequestHandler):
                 return v
         return ""
 
-    def _authorized(self, query) -> bool:
-        if not TOKEN:
+    def _local(self) -> bool:
+        """The PC itself: never asked to sign in (it's where you'd see the code)."""
+        return self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+    def _credential(self, query) -> str:
+        return query.get("token", [""])[0] or self.headers.get("X-Token", "") or self._cookie_token()
+
+    def _signed_in(self, query) -> bool:
+        cand = self._credential(query)
+        return auth.valid(cand) or bool(TOKEN) and hmac.compare_digest(cand.encode(), TOKEN.encode())
+
+    def _authorized(self, query, reply=True) -> bool:
+        if self._local() or not (auth.required() or TOKEN) or self._signed_in(query):
             return True
-        cand = query.get("token", [""])[0] or self.headers.get("X-Token", "") or self._cookie_token()
-        if hmac.compare_digest(cand.encode(), TOKEN.encode()):
-            return True
-        self._json(401, {"error": "unauthorized", "hint": "open /?token=YOUR_TOKEN"})
+        if reply:
+            self._json(401, {"error": "sign in required"})
         return False
 
     def _parse(self):
@@ -221,8 +232,12 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/ca.crt":
             certs.ensure()
             return self._file(certs.CA_CERT, "application/x-x509-ca-cert", attachment="pc-remote-ca.crt")
+        if route == "/api/auth":  # public: does this device need to sign in?
+            return self._json(200, {"required": not self._authorized(query, reply=False)})
         if not self._authorized(query):
             return
+        if route == "/api/security":
+            return self._json(200, self._security())
         if route in ("/ws", "/vstream", "/term", "/sysmon/live"):
             return self._websocket(route, query)
         if route == "/api/info":
@@ -265,26 +280,41 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         route, query = self._parse()
         commands.record()
-        if not self._guard() or not self._authorized(query):
+        if not self._guard():
+            return
+        if route != "/upload":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(min(length, 1 << 20)) or b"{}") if length else {}
+            except ValueError:
+                return self._json(400, {"error": "invalid JSON body"})
+        if route == "/api/login":  # public, rate-limited per address
+            key, wait = auth.login(self.client_address[0], str((body or {}).get("password", "")))
+            if key:
+                return self._json(200, {"key": key})
+            return self._json(429 if wait else 403, {"error": f"too many tries, wait {wait} s" if wait else "wrong code or password",
+                                                     "wait": wait})
+        if not self._authorized(query):
             return
         if route == "/upload":
             return self._upload(query)
-        length = int(self.headers.get("Content-Length") or 0)
-        try:
-            body = json.loads(self.rfile.read(length) or b"{}") if length else {}
-        except ValueError:
-            return self._json(400, {"error": "invalid JSON body"})
+        if route == "/api/security":
+            b = body if isinstance(body, dict) else {}
+            try:
+                auth.update(enabled=b.get("enabled"), password=b.get("password"),
+                            new_code=bool(b.get("new_code")), new_key=bool(b.get("new_key")))
+            except ValueError as exc:
+                return self._json(400, {"error": str(exc)})
+            return self._json(200, self._security())
         args = {k: v[0] for k, v in query.items()}
         if isinstance(body, dict):
             args.update(body)
         return self._command(route.lstrip("/"), args)
 
     def _index(self, query):
-        if not self._authorized(query):
-            return
         headers = []
-        if TOKEN:
-            headers.append(("Set-Cookie", f"pct={TOKEN}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict"))
+        if self._signed_in(query):  # e.g. a pairing link: remember it as a cookie too
+            headers.append(("Set-Cookie", f"pct={self._credential(query)}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict"))
         path = os.path.join(WEB, "index.html")
         with open(path, "rb") as f:
             body = f.read()
@@ -296,6 +326,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
+
+    def _security(self):
+        """Sign-in settings, the code and the pairing key (only ever sent to
+        the PC itself or a device that's signed in), and the addresses a new
+        device could use."""
+        return {**auth.status(include_secrets=True), "port": PORT, "env_token": bool(TOKEN),
+                "ips": [ip for ip in certs.local_ips() if ip != "127.0.0.1"]}
 
     def _info(self):
         host = self.headers.get("Host", f"localhost:{PORT}").split(":")[0]
@@ -442,8 +479,11 @@ def main():
     if sys.stderr is None:  # no console: keep a small log instead
         logging.basicConfig(filename=os.path.join(paths.DATA, "server.log"), level=logging.WARNING,
                             format="%(asctime)s %(levelname)s %(message)s")
+        faulthandler.enable(logging.getLogger().handlers[0].stream)
     else:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
+        faulthandler.enable()
+    # (a native crash - a driver call, ctypes - then leaves a traceback of every thread)
     # a crash in a worker thread would otherwise vanish without a console
     threading.excepthook = lambda a: log.error("thread %s crashed", a.thread and a.thread.name,
                                                exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
@@ -459,8 +499,8 @@ def main():
     log.info("PC Remote on http://%s:%d/%s", ips[0], PORT, "  (HTTPS on the same port)" if server.tls else "")
     if not video.FFMPEG:
         log.warning("ffmpeg not found - screen streaming disabled (winget install Gyan.FFmpeg)")
-    if not TOKEN:
-        log.warning("no PC_API_TOKEN set - anyone on your network can control this PC")
+    if not TOKEN and not auth.required():
+        log.warning("sign-in is off - anyone who can reach this PC can control it")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

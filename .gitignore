@@ -6,6 +6,8 @@ __pycache__/
 # generated at runtime
 .certs/
 server.log
+auth.json
+auth.json.tmp
 
 # Windows build
 build/

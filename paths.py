@@ -10,8 +10,8 @@ import sys
 FROZEN = getattr(sys, "frozen", False)
 APP = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
 RES = getattr(sys, "_MEIPASS", APP)
-DATA = (os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "PC Remote")
-        if FROZEN else APP)
+DATA = os.environ.get("PC_REMOTE_DATA") or (  # (the override is for testing)
+    os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "PC Remote") if FROZEN else APP)
 os.makedirs(DATA, exist_ok=True)
 
 

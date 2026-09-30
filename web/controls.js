@@ -2,7 +2,8 @@
 // rendered from the server's @command registry (unknown commands get a
 // generic row).
 import { api, run, url, h, ico, toast, haptic, sheet, choose, Slider, toggle, twoTap, INFO, fmtBytes, fmtDuration,
-         copyToDevice, tabSwitch, showTab } from './app.js';
+         copyToDevice, tabSwitch, showTab, setToken } from './app.js';
+import { qrSvg } from './qr.js';
 import { hydrateIcons } from './icons.js';
 import { resolvePlan, METHODS } from './remote.js';
 
@@ -15,7 +16,7 @@ const clockSkew = INFO.time ? INFO.time - Date.now() / 1000 : 0;
 // Soft per-icon tints (mixed toward the text colour in CSS).
 const TINT = { rocket: 'var(--orange)', link: 'var(--tint)', upload: 'var(--green)', folder: 'var(--teal)',
   clipboard: 'var(--purple)', cpu: 'var(--pink)', restart: 'var(--orange)', snow: 'var(--teal)',
-  wifi: 'var(--tint)', bluetooth: 'var(--indigo)', power: 'var(--red)', info: 'var(--gray)', shield: 'var(--green)',
+  wifi: 'var(--tint)', bluetooth: 'var(--indigo)', power: 'var(--red)', info: 'var(--gray)', shield: 'var(--green)', lock: 'var(--teal)',
   download: 'var(--tint)' };
 const KNOWN = new Set(['sleep', 'lock', 'monitor', 'screenshot', 'play', 'prev', 'next', 'mute', 'volume', 'brightness',
   'wifi', 'bluetooth', 'launch', 'sendlink', 'sendfile', 'restart', 'shutdown', 'hibernate', 'signout']);
@@ -152,7 +153,8 @@ function render() {
     h('div', { class: 'group-title' }, 'About'),
     h('div', { class: 'card' },
       row('info', 'About this PC', INFO.host ? `${INFO.host} · system, network, server` : 'System, network, server', aboutSheet),
-      INFO.https ? row('shield', 'Secure connection', secureNow() ? 'On (HTTPS)' : 'Install the certificate for the HD stream', certSheet) : null,
+      row('shield', 'Sign-in & devices', 'Add a device · code or password · on / off', securitySheet),
+      INFO.https ? row('lock', 'Secure connection', secureNow() ? 'On (HTTPS)' : 'Install the certificate for the HD stream', certSheet) : null,
       row('download', 'Install as app', 'Full screen, from your home screen', installSheet))));
   hydrateIcons(root);
   renderStats();
@@ -235,12 +237,79 @@ async function aboutSheet() {
     h('div', { class: 'card' },
       kv('Version', a.version && (a.version + (a.version_time ? ` · ${when(a.version_time)}` : ''))),
       kv('Running for', fmtDuration(a.server_up_s)),
-      kv('Access token', a.token ? 'Set' : 'Not set — anyone on your network can use this'),
+      kv('Sign-in', a.token ? 'Required' : 'Off — anyone who can reach this PC can use it'),
       kv('Video encoder', [...(a.encoders.h264 || []), ...(a.encoders.hevc || [])].join(', ') || 'None found'),
       kv('JPEG', a.tiles ? 'Changed areas only' : 'Whole frames (install numpy, simplejpeg)'),
       kv('ffmpeg', a.ffmpeg || 'Not found'), kv('Python', a.python)),
-    a.token ? null : h('div', { class: 'foot', style: 'text-align:left;margin:10px 4px 0' },
-      'To require a password, set PC_API_TOKEN in launch_remote.bat and open this page once with ?token=… .')));
+    ));
+}
+
+// ------------------------------------------------------ sign-in & pairing ---
+async function securitySheet() {
+  const s = sheet({ title: 'Sign-in & devices', body: h('div', { class: 'empty' }, 'Loading…') });
+  let st;
+  try { st = await api('/api/security'); } catch (e) { s.setBody(h('div', { class: 'empty' }, e.message)); return; }
+  const save = async patch => {
+    try { st = await api('/api/security', patch); } catch (e) { toast(e.message, { err: true }); return false; }
+    if (patch.new_key) setToken(st.key);  // this device stays signed in
+    draw();
+    return true;
+  };
+  const passwordSheet = () => {
+    const a = h('input', { class: 'input', type: 'password', placeholder: 'New password (6+ characters)', autocomplete: 'new-password' });
+    const b = h('input', { class: 'input', type: 'password', placeholder: 'Again', autocomplete: 'new-password' });
+    const p = sheet({ title: 'Your password', body: h('div', { class: 'form' }, a, b,
+      h('button', { class: 'btn', onclick: async () => {
+        if (a.value !== b.value) { toast('The two don\u2019t match', { err: true }); return; }
+        if (await save({ password: a.value })) { toast('Password saved', { ic: 'check' }); p.close(); }
+      } }, 'Save')) });
+    setTimeout(() => a.focus(), 300);
+  };
+  const draw = () => {
+    const on = toggle(st.enabled, async v => { if (!(await save({ enabled: v }))) on.input.checked = !v; });
+    s.setBody(h('div', {},
+      h('div', { class: 'card' }, row('shield', 'Require sign-in',
+        st.enabled ? 'A new device needs the code or password once' : 'Off: anyone who can reach this PC can use it', null, { right: on })),
+      st.enabled ? h('div', { class: 'group-title' }, st.code ? 'Access code' : 'Password') : null,
+      st.enabled ? h('div', { class: 'card' },
+        st.code ? h('div', { class: 'kv' }, h('span', { class: 'code' }, st.code), copyBtn(st.code)) : kv('Password', 'Your own'),
+        row('lock', st.own_password ? 'Change password' : 'Use my own password', null, passwordSheet),
+        st.own_password ? row('restart', 'Use a generated code instead', null, () => save({ new_code: true })) : null) : null,
+      h('div', { class: 'group-title' }, 'Devices'),
+      h('div', { class: 'card' },
+        row('download', 'Add a device', 'Scan a QR code: signs it in, from anywhere', () => pairSheet(st)),
+        st.enabled ? row('logout', 'Sign out all other devices', 'They\u2019ll need the code or password again', () => save({ new_key: true }),
+                         { strong: true }) : null),
+      st.env_token ? h('div', { class: 'foot', style: 'text-align:left;margin:10px 4px 0' }, 'PC_API_TOKEN is set as well, and also lets devices in.') : null));
+    hydrateIcons(s.el);
+  };
+  draw();
+}
+
+// A QR code a new device scans: the address and, with sign-in on, the key.
+function pairSheet(st) {
+  const order = ['Local network', 'Tailscale', 'Other'];
+  let ips = [...st.ips].sort((a, b) => order.indexOf(netName(a)) - order.indexOf(netName(b)));
+  // WSL / Hyper-V adapters are unreachable from a phone: only offer others if there's nothing better
+  if (ips.some(ip => netName(ip) !== 'Other')) ips = ips.filter(ip => netName(ip) !== 'Other');
+  let pick = ips[0];
+  const seg = h('div', { class: 'seg' }), qr = h('div', { class: 'qr' }), link = h('div', { class: 'foot', style: 'margin:0;word-break:break-all' });
+  const address = () => `http://${pick}:${st.port}/`;
+  const signedLink = () => address() + (st.enabled ? `?token=${st.key}` : '');
+  const draw = () => {
+    seg.replaceChildren(...ips.map(ip => h('button', { class: ip === pick ? 'on' : '', onclick: () => { pick = ip; haptic(5); draw(); } },
+      netName(ip) === 'Other' ? ip : netName(ip))));
+    qr.innerHTML = qrSvg(signedLink());
+    link.replaceChildren(address(), st.enabled && st.code ? ` · code ${st.code}` : '');
+  };
+  draw();
+  sheet({ title: 'Add a device', body: h('div', { class: 'form' },
+    h('div', { class: 'note' }, st.enabled
+      ? 'Scan this with the phone\u2019s camera: it opens PC Remote already signed in. Or open the address below and enter the code. For devices away from home, pick Tailscale.'
+      : 'Scan this with the phone\u2019s camera to open PC Remote (sign-in is off).'),
+    h('div', { style: 'overflow-x:auto;display:flex;justify-content:center' }, seg), qr, link,
+    h('button', { class: 'btn gray', onclick: async () => toast((await copyToDevice(signedLink()))
+      ? (st.enabled ? 'Copied: the link signs in whoever opens it' : 'Copied') : 'Copy failed', { ic: 'check' }) }, 'Copy the link')) });
 }
 
 // The certificate install guide, for the platform this page runs on.
@@ -473,7 +542,9 @@ function resultSheet(title, r) {
 
 // ---------------------------------------------------------- lifecycle ---
 let loaded = false;
-export function welcome() { aboutSheet(); }
+export async function welcome() {
+  try { pairSheet(await api('/api/security')); } catch { aboutSheet(); }
+}
 export function show() {
   active = true;
   if (!loaded) { loaded = true; load(); } else api('/api/state').then(d => { state = d.state; pending = d.pending; render(); }).catch(() => {});
