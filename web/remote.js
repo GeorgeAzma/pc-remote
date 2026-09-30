@@ -1,7 +1,7 @@
 // Remote tab: live screen (WebCodecs H.264 or MJPEG), cursor overlay with
 // local prediction, trackpad + direct-touch gestures, live keyboard.
 import { settings, setSetting, bus, h, ico, toast, haptic, sheet, url, wsUrl, INFO, Slider, toggle,
-         copyToDevice, placeDock } from './app.js';
+         copyToDevice } from './app.js';
 import { hydrateIcons } from './icons.js';
 
 const $ = id => document.getElementById(id);
@@ -412,7 +412,6 @@ function layout() {
     setView(view.s, view.tx, view.ty);
   }
   placeGrip(root, side, noPanel, typing);
-  placeDock();
 }
 new ResizeObserver(() => layout()).observe(stage.parentElement);
 // The panel's grab bar: in the gap between the picture and the panel, or at
@@ -1303,7 +1302,7 @@ function gestureSheet() {
       item(keycap('⌨'), 'On a computer', 'Click the picture, then type: your keyboard goes straight to the PC.')]),
     ...group('Panel', [
       item(fingers(1, 'drag'), 'Grab bar', 'Drag it to resize the panel. Tap it to hide the panel and go full screen.'),
-      item(keycap('⌄'), 'Tabs', 'The floating tab buttons fold into a small bar with ⌄; tap the bar to bring them back.')])) });
+      item(keycap('⋯'), 'Views', 'Switch between Remote, Terminal and Controls with the three icons at the top.')])) });
 }
 $('btn-settings').addEventListener('click', () => { haptic(5); settingsSheet(); });
 

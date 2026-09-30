@@ -52,7 +52,7 @@ function askToken() {
 const DEFAULTS = {
   speed: 1, accel: 0.6, scroll: 1, natural: true, touch: 'direct', stream: 'auto', quality: 0.5,
   stats: false, haptics: true, termFont: 13, tab: 'remote', recents: [], shell: 'ps',
-  hidePanel: false, hideTabs: false, panelW: 0, padH: 0,  // 0 = automatic size
+  hidePanel: false, panelW: 0, padH: 0,  // 0 = automatic size
   maxMbps: 0,  // stream bitrate limit, 0 = none
   pins: [],  // shortcuts shown in the key bar
 };
@@ -298,36 +298,28 @@ export function showTab(name) {
   const prev = current;
   current = name;
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.dataset.view === name));
-  document.querySelectorAll('.dock button[data-tab]').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.tabsw button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
   if (prev && views[prev].hide) views[prev].hide();
   views[name].show && views[name].show();
   setSetting('tab', name);
-  placeDock();
 }
 
-// The dock floats just above the active view's bottom controls
-// (elements marked data-dock-above), or near the bottom edge without any.
-export function placeDock() {
-  const v = document.querySelector('.view.active');
-  let lift = 10;
-  if (v) {
-    const bottom = v.getBoundingClientRect().bottom;
-    for (const el of v.querySelectorAll('[data-dock-above]')) {
-      const r = el.getBoundingClientRect();
-      if (r.height && el.offsetParent) lift = Math.max(lift, bottom - r.top + 8);
-    }
-  }
-  document.documentElement.style.setProperty('--dock-b', Math.round(lift) + 'px');
+// Switching views: a small segmented control each view keeps in its own top
+// bar (over the picture, the terminal's bar, the Controls header), so it
+// takes no room of its own.
+const TABS = [['remote', 'trackpad', 'Remote'], ['term', 'terminal', 'Terminal'], ['controls', 'controls', 'Controls']];
+export function tabSwitch(el = h('div', { class: 'tabsw' })) {
+  el.setAttribute('role', 'tablist');
+  el.replaceChildren(...TABS.map(([t, ic, name]) => h('button', {
+    'data-tab': t, class: t === current ? 'on' : '', role: 'tab', 'aria-label': name, title: name, icon: ic,
+    onclick: () => { haptic(5); showTab(t); } })));
+  return el;
 }
-const dockWatch = new ResizeObserver(() => placeDock());
-document.querySelectorAll('[data-dock-above], .view').forEach(el => dockWatch.observe(el));
-addEventListener('resize', placeDock);
 export const currentTab = () => current;
 
 // ------------------------------------------------------------ viewport ---
 // iOS keeps the layout viewport when the keyboard opens; size the shell to
-// the *visual* viewport so inputs stay above the keyboard, and hide the tab
-// bar meanwhile (like native apps).
+// the *visual* viewport so inputs stay above the keyboard.
 function fitViewport() {
   const vv = window.visualViewport;
   const hgt = (vv && vv.height) || innerHeight;
@@ -350,12 +342,7 @@ export let INFO = { shells: [], displays: [], video: {} };
 async function boot() {
   hydrateIcons();
   fitViewport();
-  document.querySelectorAll('.dock button[data-tab]').forEach(b => b.addEventListener('click', () => { haptic(5); showTab(b.dataset.tab); }));
-  // The tab bar can fold away to a small handle, leaving the room to the view.
-  const tabs = () => { document.body.classList.toggle('tabs-off', !!settings.hideTabs); fitViewport(); };
-  document.getElementById('tabs-hide').addEventListener('click', () => { haptic(5); setSetting('hideTabs', true); tabs(); });
-  document.getElementById('tabs-show').addEventListener('click', () => { haptic(5); setSetting('hideTabs', false); tabs(); });
-  tabs();
+  document.querySelectorAll('[data-tabs]').forEach(el => tabSwitch(el));
   try { INFO = await api('/api/info'); } catch (e) { if (!/Token/.test(e.message)) toast('Server unreachable', { err: true }); }
   document.title = (INFO.host || 'PC') + ' · Remote';
   const [remote, term, controls] = await Promise.all([import('./remote.js'), import('./term.js'), import('./controls.js')]);

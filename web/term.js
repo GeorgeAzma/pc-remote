@@ -335,10 +335,12 @@ $('term-font-dn').addEventListener('click', () => { haptic(5); font(-1); });
 $('term-menu').addEventListener('click', async () => {
   const v = await choose('Terminal', [
     { label: 'Paste from clipboard', value: 'paste' }, { label: 'Copy all output', value: 'copy' },
+    { label: `Larger text (${settings.termFont + 1})`, value: 'bigger' }, { label: `Smaller text (${settings.termFont - 1})`, value: 'smaller' },
     { label: 'Clear scrollback', value: 'clear' }, { label: 'Restart shell', value: 'restart' },
     { label: 'End session', value: 'kill', red: true }]);
   if (!v || !emu) return;
-  if (v === 'paste') { try { paste(await navigator.clipboard.readText()); } catch { toast('Clipboard not available here', { err: true }); } }
+  if (v === 'bigger' || v === 'smaller') font(v === 'bigger' ? 1 : -1);
+  else if (v === 'paste') { try { paste(await navigator.clipboard.readText()); } catch { toast('Clipboard not available here', { err: true }); } }
   else if (v === 'copy') {
     const text = [...emu.scrollback, ...emu.buf].map(l => l.ch.join('').replace(/\s+$/, '')).join('\n').replace(/\n+$/, '');
     toast((await copyToDevice(text)) ? 'Copied' : 'Copy failed', { ic: 'check' });

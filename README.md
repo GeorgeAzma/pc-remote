@@ -82,8 +82,9 @@ and text field) slides away and the browser goes full screen. The bar then
 waits at the screen edge; tap it, drag it out, or press Esc to bring the
 panel back.
 
-The tabs are small floating buttons in the bottom-right corner, so they take
-no room; ⌄ folds them into a small bar (tap it to bring them back).
+Switch between Remote, Terminal and Controls with the three small icons at
+the top of each view: over the picture, in the terminal's bar and in the
+Controls header. They take no room of their own.
 The picture still takes taps and your physical keyboard (or works as the
 trackpad, see *Touching the screen* in Settings).
 

@@ -2,7 +2,7 @@
 // rendered from the server's @command registry (unknown commands get a
 // generic row).
 import { api, run, url, h, ico, toast, haptic, sheet, choose, Slider, toggle, twoTap, INFO, fmtBytes, fmtDuration,
-         copyToDevice } from './app.js';
+         copyToDevice, tabSwitch } from './app.js';
 import { hydrateIcons } from './icons.js';
 import { resolvePlan, METHODS } from './remote.js';
 
@@ -127,7 +127,7 @@ function render() {
     row('logout', 'Sign out', 'Open apps will close', () => act('signout', {}, 'Signing out…'), { strong: true }));
   const extra = Object.entries(cmds).filter(([n, m]) => !m.hide && !KNOWN.has(n));
   root.replaceChildren(h('div', {},
-    h('div', { class: 'ctl-head' }, h('div', {}, h('h1', {}, INFO.host || 'PC'), h('div', { class: 'sub', id: 'ctl-stats' }))),
+    h('div', { class: 'ctl-head' }, h('div', {}, h('h1', {}, INFO.host || 'PC'), h('div', { class: 'sub', id: 'ctl-stats' })), tabSwitch()),
     h('div', { id: 'ctl-banner' }),
     tiles,
     h('div', { class: 'card pad-x' },

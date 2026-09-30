@@ -33,6 +33,7 @@
           <button class="pill hidden" id="hd-pill" title="Switch to the HD stream (HTTPS)">HD</button>
           <button class="pill hidden" id="zoom-pill" aria-label="Reset zoom">1×</button>
           <button class="pill hidden" id="display-pill" aria-label="Switch display"></button>
+          <div class="tabsw on-video" data-tabs></div>
         </div>
         <pre class="hud hidden" id="hud"></pre>
         <div class="stage-msg hidden" id="stage-msg"></div>
@@ -42,15 +43,15 @@
           <span>Tap to click</span><span>Two fingers scroll · right-click</span><span>Hold to drag</span>
         </div>
       </div>
-      <div class="clip-pill hidden" id="clip-pill" data-dock-above>
+      <div class="clip-pill hidden" id="clip-pill">
         <span class="clip-ico" data-icon="clipboard"></span>
         <span class="clip-text" id="clip-text"></span>
         <button class="clip-btn" id="clip-copy">Copy</button>
         <button class="clip-x" id="clip-x" aria-label="Dismiss" data-icon="x"></button>
       </div>
       <button class="grip" id="panel-grip" aria-label="Hide trackpad and keys"></button>
-      <div class="keystrip hidden" id="keystrip" role="toolbar" aria-label="Keys" data-dock-above></div>
-      <div class="inputbar" data-dock-above>
+      <div class="keystrip hidden" id="keystrip" role="toolbar" aria-label="Keys"></div>
+      <div class="inputbar">
         <label class="field">
           <span class="field-ico" data-icon="keyboard"></span>
           <input id="kb" type="text" placeholder="Type on PC" autocomplete="off" autocorrect="off"
@@ -72,13 +73,14 @@
         <button class="icon-btn sm" id="term-font-dn" aria-label="Smaller text" data-icon="textsm"></button>
         <button class="icon-btn sm" id="term-font-up" aria-label="Larger text" data-icon="textlg"></button>
         <button class="icon-btn sm" id="term-menu" aria-label="Terminal menu" data-icon="more"></button>
+        <div class="tabsw" data-tabs></div>
       </div>
       <div class="term-screen" id="term-screen" tabindex="0">
         <div class="term-rows" id="term-rows"></div>
         <textarea id="term-input" class="term-input" autocomplete="off" autocorrect="off"
                   autocapitalize="off" spellcheck="false" aria-label="Terminal input"></textarea>
       </div>
-      <div class="accbar" id="term-acc" role="toolbar" aria-label="Terminal keys" data-dock-above></div>
+      <div class="accbar" id="term-acc" role="toolbar" aria-label="Terminal keys"></div>
     </div>
   </section>
 
@@ -88,13 +90,6 @@
   </section>
 </div>
 
-<nav class="dock" id="tabbar" aria-label="Tabs">
-  <button data-tab="remote" aria-label="Remote" title="Remote"><span data-icon="trackpad"></span></button>
-  <button data-tab="term" aria-label="Terminal" title="Terminal"><span data-icon="terminal"></span></button>
-  <button data-tab="controls" aria-label="Controls" title="Controls"><span data-icon="controls"></span></button>
-  <button class="tabs-hide" id="tabs-hide" aria-label="Hide tabs" title="Hide tabs" data-icon="chevdown"></button>
-</nav>
-<button class="grip h up tabs-handle" id="tabs-show" aria-label="Show tabs" title="Show tabs"></button>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div class="sheets" id="sheets"></div>
