@@ -905,7 +905,7 @@ setInterval(() => {
     const srv = sv.mode === video.mode ? sv : {};
     const enc = video.mode === 'jpeg' ? (srv.enc === 'tiles' ? 'JPEG tiles' : 'MJPEG') : `${video.mode === 'hevc' ? 'HEVC' : 'H.264'} ${srv.enc || ''}`;
     const tune = [video.mode === 'jpeg' ? srv.jq != null && `q:v ${srv.jq}` : srv.cq != null && `cq ${srv.cq} ${srv.preset}`,
-                  srv.qd != null && `queue ${srv.qd} ms`].filter(Boolean).join('  ');
+                  srv.qd != null && `queue ${Number(srv.qd).toFixed(1)} ms`].filter(Boolean).join('  ');
     hud.textContent = [
       `${enc}${video.mode === 'mse' ? ' → <video>' : ''}${srv.w ? `  ${srv.w}×${srv.h}` : ''}${srv.native ? ' native' : ''}`,
       `${s.fps.toFixed(0)}${srv.fps ? '/' + srv.fps : ''} fps  ${s.mbps.toFixed(1)} Mb/s${srv.cap ? ' / ' + (srv.cap / 1e6).toFixed(0) : ''}`,
