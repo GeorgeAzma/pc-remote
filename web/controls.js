@@ -90,7 +90,7 @@ function whenLabel(s) { return s < 60 ? `in ${s}s` : `in ${Math.round(s / 60)} m
 async function timers(name, verb, { force = false } = {}) {
   const opts = [60, 300, 900, 1800, 3600].map(s => ({ label: `${verb} ${whenLabel(s)}`, value: s }));
   if (force) opts.push({ label: `Force ${verb.toLowerCase()} now (closes apps)`, value: 'force', red: true });
-  const v = await choose(verb, opts, force ? 'Unsaved work in open apps may be lost.' : 'You can cancel it from here.');
+  const v = await choose(verb, opts, force ? 'Unsaved work may be lost.' : 'You can cancel it here.');
   if (v === null) return;
   await act(name, v === 'force' ? { force: true, seconds: 0 } : { seconds: v }, v === 'force' ? `${verb}…` : `${verb} ${whenLabel(v)}`);
 }
@@ -103,7 +103,7 @@ function render() {
   const tiles = h('div', { class: 'tiles' },
     strongTile('moon', 'Sleep', () => act('sleep', {}, 'Sleeping…'), () => timers('sleep', 'Sleep')),
     strongTile('lock', 'Lock', () => act('lock', {}, 'Locked')),
-    tile('display', 'Screen off', () => act('monitor', { on: false }, 'Screen off — any input wakes it')),
+    tile('display', 'Screen off', () => act('monitor', { on: false }, 'Screen off. Any input wakes it')),
     tile('camera', 'Screenshot', () => screenshotSheet()),
     tile('prev', 'Previous', () => act('prev', {}, null)),
     tile('playpause', 'Play/Pause', () => act('play', {}, null)),
@@ -118,22 +118,22 @@ function render() {
       hydrateIcons(t);
     }, muted));
   const radios = h('div', { class: 'card' },
-    radioRow('wifi', 'wifi', 'Wi-Fi', 'Turning Wi-Fi off can disconnect this remote.'),
+    radioRow('wifi', 'wifi', 'Wi-Fi', 'This can disconnect the remote.'),
     radioRow('bluetooth', 'bluetooth', 'Bluetooth'));
   const tools = h('div', { class: 'card' },
-    row('rocket', 'Open app', 'Start anything on the PC', launchSheet),
-    row('link', 'Open link', 'In the PC’s browser', linkSheet),
-    row('upload', 'Send files to PC', 'Saved to Downloads', uploadPick),
-    row('folder', 'Get files from PC', 'Browse & download', () => filesSheet()),
-    row('clipboard', 'Clipboard', 'Sync text between devices', clipboardSheet),
-    row('cpu', 'Running apps', 'Memory use · end tasks', processesSheet));
+    row('rocket', 'Open app', null, launchSheet),
+    row('link', 'Open link', null, linkSheet),
+    row('upload', 'Send files to PC', 'To Downloads', uploadPick),
+    row('folder', 'Get files from PC', null, () => filesSheet()),
+    row('clipboard', 'Clipboard', null, clipboardSheet),
+    row('cpu', 'Running apps', null, processesSheet));
   const power = h('div', { class: 'card' },
     row('restart', 'Restart', 'Hold for a timer', () => act('restart', {}, 'Restarting…'),
         { strong: true, onLong: () => timers('restart', 'Restart', { force: true }) }),
     row('power', 'Shut down', 'Hold for a timer', () => act('shutdown', {}, 'Shutting down…'),
         { danger: true, strong: true, onLong: () => timers('shutdown', 'Shut down', { force: true }) }),
     row('snow', 'Hibernate', null, () => act('hibernate', {}, 'Hibernating…'), { strong: true }),
-    row('logout', 'Sign out', 'Open apps will close', () => act('signout', {}, 'Signing out…'), { strong: true }));
+    row('logout', 'Sign out', null, () => act('signout', {}, 'Signing out…'), { strong: true }));
   const extra = Object.entries(cmds).filter(([n, m]) => !m.hide && !KNOWN.has(n));
   root.replaceChildren(h('div', {},
     h('div', { class: 'ctl-head' }, h('div', {}, h('h1', {}, INFO.host || 'PC'),
@@ -152,10 +152,10 @@ function render() {
       () => genericCommand(n, m), { strong: m.confirm && !m.params.length, danger: m.danger }))) : null,
     h('div', { class: 'group-title' }, 'About'),
     h('div', { class: 'card' },
-      row('info', 'About this PC', INFO.host ? `${INFO.host} · system, network, server` : 'System, network, server', aboutSheet),
-      row('shield', 'Sign-in & devices', 'Add a device · code or password · on / off', securitySheet),
-      INFO.https ? row('lock', 'Secure connection', secureNow() ? 'On (HTTPS)' : 'Install the certificate for the HD stream', certSheet) : null,
-      row('download', 'Install as app', 'Full screen, from your home screen', installSheet))));
+      row('info', 'About this PC', null, aboutSheet),
+      row('shield', 'Sign-in & devices', null, securitySheet),
+      INFO.https ? row('lock', 'Secure connection', secureNow() ? 'On' : 'For the HD stream', certSheet) : null,
+      row('download', 'Install as app', null, installSheet))));
   hydrateIcons(root);
   renderStats();
   renderBanner();
@@ -171,7 +171,7 @@ function radioRow(name, icn, title, warnOff) {
     catch { sw.input.checked = !on; }
   });
   if (!known) { sw.classList.add('unknown'); sw.title = state[name]?.error || 'unknown'; }
-  return row(icn, title, known ? null : 'Status unavailable', null, { right: sw });
+  return row(icn, title, known ? null : 'Unavailable', null, { right: sw });
 }
 
 const secureNow = () => location.protocol === 'https:' && window.isSecureContext;
@@ -224,7 +224,7 @@ async function aboutSheet() {
       kv('Name', a.host), kv('Windows', a.windows), kv('Processor', a.cpu && `${a.cpu.replace(/\((R|TM)\)/g, '').replace(/\s+/g, ' ')} · ${a.cores} threads`),
       kv('Graphics', a.gpus.join(', ')), kv('Memory', a.ram_gb && `${Math.round(a.ram_gb)} GB`),
       ...a.displays.map(d => kv(d.name + (d.primary ? ' (main)' : ''), `${d.w} × ${d.h} · ${d.hz} Hz`)),
-      kv('Up for', a.uptime_s && fmtDuration(a.uptime_s))),
+      kv('Uptime', a.uptime_s && fmtDuration(a.uptime_s))),
     h('div', { class: 'group-title' }, 'This device'),
     h('div', { class: 'card' },
       kv('Connection', secureNow() ? 'Secure (HTTPS)' : 'Plain HTTP'),
@@ -237,8 +237,8 @@ async function aboutSheet() {
     h('div', { class: 'group-title' }, 'Server'),
     h('div', { class: 'card' },
       kv('Version', a.version && (a.version + (a.version_time ? ` · ${when(a.version_time)}` : ''))),
-      kv('Running for', fmtDuration(a.server_up_s)),
-      kv('Sign-in', a.sign_in ? 'Required' : 'Off — anyone who can reach this PC can use it'),
+      kv('Uptime', fmtDuration(a.server_up_s)),
+      kv('Sign-in', a.sign_in ? 'On' : 'Off'),
       kv('Video encoder', [...(a.encoders.h264 || []), ...(a.encoders.hevc || [])].join(', ') || 'None found'),
       kv('JPEG', a.tiles ? 'Changed areas only' : 'Whole frames (install numpy, simplejpeg)'),
       kv('ffmpeg', a.ffmpeg || 'Not found'), kv('Python', a.python))));
@@ -257,10 +257,10 @@ async function securitySheet() {
   };
   const passwordSheet = () => {
     const a = h('input', { class: 'input', type: 'password', placeholder: 'New password (6+ characters)', autocomplete: 'new-password' });
-    const b = h('input', { class: 'input', type: 'password', placeholder: 'Again', autocomplete: 'new-password' });
-    const p = sheet({ title: 'Your password', body: h('div', { class: 'form' }, a, b,
+    const b = h('input', { class: 'input', type: 'password', placeholder: 'Repeat it', autocomplete: 'new-password' });
+    const p = sheet({ title: 'Password', body: h('div', { class: 'form' }, a, b,
       h('button', { class: 'btn', onclick: async () => {
-        if (a.value !== b.value) { toast('The two don\u2019t match', { err: true }); return; }
+        if (a.value !== b.value) { toast('Passwords don\u2019t match', { err: true }); return; }
         if (await save({ password: a.value })) { toast('Password saved', { ic: 'check' }); p.close(); }
       } }, 'Save')) });
     setTimeout(() => a.focus(), 300);
@@ -269,18 +269,17 @@ async function securitySheet() {
     const on = toggle(st.enabled, async v => { if (!(await save({ enabled: v }))) on.input.checked = !v; });
     s.setBody(h('div', {},
       h('div', { class: 'card' }, row('shield', 'Require sign-in',
-        st.enabled ? 'A new device needs the code or password once' : 'Off: anyone who can reach this PC can use it', null, { right: on })),
+        st.enabled ? null : 'Anyone who can reach this PC can use it', null, { right: on })),
       st.enabled ? h('div', { class: 'group-title' }, st.code ? 'Access code' : 'Password') : null,
       st.enabled ? h('div', { class: 'card' },
         st.code ? h('div', { class: 'kv' }, h('span', { class: 'code' }, st.code), copyBtn(st.code)) : kv('Password', 'Your own'),
-        row('lock', st.own_password ? 'Change password' : 'Use my own password', null, passwordSheet),
-        st.own_password ? row('restart', 'Use a generated code instead', null, () => save({ new_code: true })) : null) : null,
+        row('lock', st.own_password ? 'Change password' : 'Set a password', null, passwordSheet),
+        st.own_password ? row('restart', 'Use a code instead', null, () => save({ new_code: true })) : null) : null,
       h('div', { class: 'group-title' }, 'Devices'),
       h('div', { class: 'card' },
-        row('download', 'Add a device', 'Scan a QR code: signs it in, from anywhere', () => pairSheet(st)),
-        st.enabled ? row('logout', 'Sign out all other devices', 'They\u2019ll need the code or password again', () => save({ new_key: true }),
-                         { strong: true }) : null),
-      st.env_token ? h('div', { class: 'foot', style: 'text-align:left;margin:10px 4px 0' }, 'PC_API_TOKEN is set as well, and also lets devices in.') : null));
+        row('download', 'Add a device', null, () => pairSheet(st)),
+        st.enabled ? row('logout', 'Sign out other devices', null, () => save({ new_key: true }), { strong: true }) : null),
+      st.env_token ? h('div', { class: 'foot', style: 'text-align:left;margin:10px 4px 0' }, 'PC_API_TOKEN also lets devices in.') : null));
     hydrateIcons(s.el);
   };
   draw();
@@ -304,12 +303,12 @@ function pairSheet(st) {
   };
   draw();
   sheet({ title: 'Add a device', body: h('div', { class: 'form' },
-    h('div', { class: 'note' }, st.enabled
-      ? 'Scan this with the phone\u2019s camera, or with Scan the QR code on the app\u2019s sign-in screen: it signs in. Or open the address below and enter the code. For devices away from home, pick Tailscale.'
-      : 'Scan this with the phone\u2019s camera to open PC Remote (sign-in is off).'),
+    h('div', { class: 'note' }, (st.enabled
+      ? 'Scan with the phone\u2019s camera or the app\u2019s sign-in screen.' : 'Scan with the phone\u2019s camera.')
+      + (ips.some(ip => netName(ip) === 'Tailscale') ? ' Away from home? Pick Tailscale.' : '')),
     h('div', { style: 'overflow-x:auto;display:flex;justify-content:center' }, seg), qr, link,
     h('button', { class: 'btn gray', onclick: async () => toast((await copyToDevice(signedLink()))
-      ? (st.enabled ? 'Copied: the link signs in whoever opens it' : 'Copied') : 'Copy failed', { ic: 'check' }) }, 'Copy the link')) });
+      ? (st.enabled ? 'Copied. Anyone with the link can sign in' : 'Copied') : 'Copy failed', { ic: 'check' }) }, 'Copy link')) });
 }
 
 // The certificate install guide, for the platform this page runs on.
@@ -352,8 +351,8 @@ async function certSheet() {
   const fp = h('div');
   const s = sheet({ title: 'Secure connection', body: h('div', { class: 'form' },
     h('div', { class: 'note' + (secureNow() ? ' ok' : '') }, secureNow()
-      ? 'This page is on the secure address, so the HD stream (H.264, lowest latency and data) is available. Install the certificate on other devices the same way.'
-      : 'Browsers only allow the HD stream (H.264: lowest latency and data) on secure pages. The PC makes its own certificate; install it once on this device and the secure address opens without warnings.'),
+      ? 'You\u2019re on the secure address, so the HD stream works here.'
+      : 'The HD stream (lowest latency and data) needs the secure address. Install the PC\u2019s certificate once and it opens without warnings.'),
     h('div', { style: 'overflow-x:auto' }, seg), steps,
     h('div', { class: 'btns' },
       h('a', { class: 'btn gray', href: '/ca.crt', style: 'display:grid;place-items:center;text-decoration:none' }, 'Download certificate'),
@@ -363,7 +362,7 @@ async function certSheet() {
   try {
     const c = (about ||= await run('about')).certificate;
     if (c) fp.replaceChildren(h('div', { class: 'foot', style: 'text-align:left;margin:4px 2px 0' },
-      'To check it’s the right one, its SHA-256 fingerprint is ', h('span', { class: 'fp' }, c.sha256), `. Valid until ${when(c.expires)}.`));
+      'SHA-256 ', h('span', { class: 'fp' }, c.sha256), ` · valid until ${when(c.expires)}`));
   } catch {}
 }
 
@@ -375,8 +374,8 @@ function installSheet() {
     mac: 'In Safari, choose File → Add to Dock; in Chrome, ⋮ → Save and share → Install page as app.' }[p];
   const s = sheet({ title: 'Install as app', body: h('div', { class: 'form' },
     h('div', { class: 'note' + (standalone ? ' ok' : '') }, standalone
-      ? 'You’re already using the installed app.'
-      : 'Opened from your home screen, the remote runs full screen without the browser’s bars, like a native app.'),
+      ? 'Already installed.'
+      : 'From the home screen it opens full screen, like an app.'),
     standalone ? null : h('div', { style: 'font-size:15px;line-height:1.45' }, how),
     installPrompt && !standalone ? h('button', { class: 'btn', onclick: async () => {
       installPrompt.prompt(); await installPrompt.userChoice.catch(() => {}); installPrompt = null; s.close();
@@ -482,15 +481,15 @@ async function filesSheet(path = '') {
 }
 
 async function clipboardSheet() {
-  const pc = h('textarea', { class: 'input', readonly: true, placeholder: 'PC clipboard is empty' });
-  const mine = h('textarea', { class: 'input', placeholder: 'Text to put on the PC clipboard' });
+  const pc = h('textarea', { class: 'input', readonly: true, placeholder: 'Empty' });
+  const mine = h('textarea', { class: 'input', placeholder: 'Text for the PC' });
   sheet({ title: 'Clipboard', body: h('div', { class: 'form' },
     h('div', { class: 'group-title', style: 'margin:0 4px' }, 'On the PC'), pc,
     h('button', { class: 'btn', onclick: async () => toast((await copyToDevice(pc.value)) ? 'Copied to this device' : 'Copy failed', { ic: 'check' }) }, 'Copy to this device'),
     h('div', { class: 'group-title', style: 'margin:8px 4px 0' }, 'Send to the PC'), mine,
     h('div', { class: 'btns' },
       h('button', { class: 'btn gray', onclick: async () => { try { mine.value = await navigator.clipboard.readText(); } catch { toast('Paste into the field instead'); } } }, 'Paste here'),
-      h('button', { class: 'btn', onclick: () => act('paste', { text: mine.value }, 'PC clipboard set') }, 'Send'))) });
+      h('button', { class: 'btn', onclick: () => act('paste', { text: mine.value }, 'Sent') }, 'Send'))) });
   try { pc.value = (await run('copy')).text; } catch {}
 }
 

@@ -16,36 +16,39 @@ const pair = (a, b) => { const m = Math.max(a, b), [d, u] = m >= 1e6 ? [1e6, 'MB
   const f = v => (v / d).toFixed(d > 1 && m / d < 100 ? 1 : 0); return `${f(a)} / ${f(b)} ${u}`; };
 // load 0..100 -> a colour from calm blue to hot orange
 const heat = v => `color-mix(in srgb, var(--mon-hot) ${Math.round(Math.min(100, Math.max(0, v)) ** 1.25 / 100 ** 0.25)}%, var(--mon-cool))`;
-// The graphs show the last minute; at 20 samples a second that's up to
-// 1200 points, drawn from at most SPARK_PTS averaged (or, for rates, peak) buckets.
-const SPARK_PTS = 240;
-function downsample(vals, peak) {
-  if (vals.length <= SPARK_PTS) return vals;
-  const out = [], step = vals.length / SPARK_PTS;
-  for (let i = 0; i < SPARK_PTS; i++) {
-    const part = vals.slice(Math.floor(i * step), Math.floor((i + 1) * step));
-    out.push(peak ? Math.max(...part) : part.reduce((a, b) => a + b, 0) / part.length);
-  }
-  return out;
-}
+// The graphs show the last minute on a fixed time scale: the newest sample
+// at the right edge, a minute ago at the left. At 20 samples a second that's
+// 1200 samples, drawn as buckets of BUCKET (averaged, or for rates the peak).
+// Buckets go by sample number, not by position in the kept history, so a
+// finished bucket never changes and the graph slides instead of wobbling.
+const BUCKET = 5;
 function spark(series, { max = 100, colors = ['var(--mon-cool)'], window = 1200 } = {}) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('viewBox', '0 0 100 20');
   svg.setAttribute('preserveAspectRatio', 'none');
   svg.classList.add('spark');
-  const draw = data => {
-    const pts = data.map(v => downsample(v.slice(-window), !max));
-    const top = max || Math.max(1, ...pts.flat());
-    const span = Math.min(window, SPARK_PTS) - 1;
-    svg.innerHTML = pts.map((vals, k) => {
-      if (vals.length < 2) return '';
-      const n = vals.length, c = colors[k % colors.length];
-      const xy = vals.map((v, i) => `${(100 - (n - 1 - i) * 100 / span).toFixed(2)},${(19.5 - 19 * Math.min(1, v / top)).toFixed(2)}`);
-      return `<path d="M${xy[0].split(',')[0]},20 L${xy.join(' L')} L100,20Z" fill="${c}" opacity=".16"/>` +
+  // data: arrays whose last element is sample number total - 1
+  const draw = (data, total) => {
+    const x = n => 100 - (total - 1 - n) * 100 / (window - 1);  // sample number -> x
+    const lines = data.map(vals => {
+      const out = [], first = total - vals.length;
+      for (let n = Math.max(first, total - window); n < total;) {
+        const end = Math.min(total, (Math.floor(n / BUCKET) + 1) * BUCKET);
+        const part = vals.slice(n - first, end - first);
+        out.push([x((n + end - 1) / 2), max ? part.reduce((a, b) => a + b, 0) / part.length : Math.max(...part)]);
+        n = end;
+      }
+      return out;
+    });
+    const top = max || Math.max(1, ...lines.flat().map(p => p[1]));
+    svg.innerHTML = lines.map((pts, k) => {
+      if (pts.length < 2) return '';
+      const c = colors[k % colors.length];
+      const xy = pts.map(([px, v]) => `${px.toFixed(2)},${(19.5 - 19 * Math.min(1, v / top)).toFixed(2)}`);
+      return `<path d="M${pts[0][0].toFixed(2)},20 L${xy.join(' L')} L${pts.at(-1)[0].toFixed(2)},20Z" fill="${c}" opacity=".16"/>` +
              `<path d="M${xy.join(' L')}" fill="none" stroke="${c}" stroke-width="1.3" vector-effect="non-scaling-stroke"/>`;
     }).join('');
   };
-  draw(series);
   return { el: svg, draw };
 }
 const bar = (parts, cls = '') => {  // parts: [[fraction, colour], ...]
@@ -56,7 +59,7 @@ const bar = (parts, cls = '') => {  // parts: [[fraction, colour], ...]
 };
 
 // ---------------------------------------------------------- lifecycle ---
-const st = { static: null, hist: null, slow: {}, cur: null, every: 0.05 };
+const st = { static: null, hist: null, slow: {}, cur: null, every: 0.05, n: 0 };  // n: samples so far
 let active = false, ws = null, update = null, dirty = false, retryT = 0, wake = null;
 
 function frame() {
@@ -71,7 +74,7 @@ function connect() {
   sock.onmessage = e => {
     const m = JSON.parse(e.data);
     if (m.t === 'hello') {
-      Object.assign(st, { static: m.cpu, hist: m.history, slow: m.slow || {}, every: m.every_s });
+      Object.assign(st, { static: m.cpu, hist: m.history, slow: m.slow || {}, every: m.every_s, n: m.history.cpu?.length || 0 });
       $('mon-sub').textContent = `Live · ${Math.round(1 / m.every_s)} updates a second`;
       return;
     }
@@ -84,6 +87,7 @@ function connect() {
     push('gpu', m.gpu?.util ?? 0);
     push('net_rx', m.net.rx); push('net_tx', m.net.tx);
     push('disk_r', m.disk.read); push('disk_w', m.disk.write);
+    st.n++;
     if (!dirty) { dirty = true; requestAnimationFrame(frame); }
   };
   sock.onclose = () => {
@@ -143,12 +147,12 @@ function buildMonitor(body, st) {
       h('div', { class: 'bars' }, fills.map(f => h('i', {}, f))), h('span', { class: 'lbl' }, label), ghz));
     return { c, fills, ghz };
   });
-  up.push(({ cur, hist }) => {
+  up.push(({ cur, hist, n }) => {
     const c = cur.cpu;
     cpuBig.replaceChildren(String(Math.round(sm('cpu', c.total ?? 0))), h('small', {}, '%'));
     const clk = sm('clock', c.clock);
     cpuClock.textContent = clk ? `${(clk / 1000).toFixed(2)} GHz` : '';
-    cpuSpark.draw([hist.cpu]);
+    cpuSpark.draw([hist.cpu], n);
     for (const t of tiles) {
       t.c.threads.forEach((i, k) => {
         const v = c.threads[i] ?? 0;
@@ -164,15 +168,15 @@ function buildMonitor(body, st) {
       h('div', {}, st.static.name || 'CPU'),
       h('div', {}, cpuClock, ` · ${nP ? `${nP}P + ${nE}E cores` : `${cores.length} cores`} · ${units} threads`))),
     cpuSpark.el, map,
-    nP ? h('div', { class: 'mon-note' }, 'Taller tiles are performance cores (one bar per thread), smaller ones efficiency cores. Numbers are GHz.') : null);
+    nP ? h('div', { class: 'mon-note' }, 'Big tiles are performance cores (a bar per thread), small ones efficiency cores. Numbers are GHz.') : null);
 
   // ---- memory
   const memBig = txt('mon-big'), memSide = txt(), memBar = bar([]), memLegend = h('div', { class: 'mon-legend' });
   const memRows = h('div', { class: 'mon-rows' }), memSpark = spark([[]]);
-  up.push(({ cur, hist }) => {
+  up.push(({ cur, hist, n }) => {
     const m = cur.mem, free = m.total - m.used;
     memBig.replaceChildren(String(Math.round(100 * m.used / m.total)), h('small', {}, '%'));
-    memSide.textContent = `${gb(m.used)} of ${gb(m.total)} GB in use`;
+    memSide.textContent = `${gb(m.used)} / ${gb(m.total)} GB`;
     memBar.set([[m.used / m.total, 'var(--mon-cool)'], [m.cached / m.total, 'color-mix(in srgb, var(--mon-cool) 35%, transparent)']]);
     memLegend.replaceChildren(
       h('span', {}, h('i', { style: 'background:var(--mon-cool)' }), `In use ${gb(m.used)} GB`),
@@ -180,7 +184,7 @@ function buildMonitor(body, st) {
       h('span', {}, h('i', { style: 'background:var(--fill)' }), `Free ${gb(Math.max(0, free - m.cached))} GB`));
     memRows.replaceChildren(kv('Committed', `${gb(m.commit)} / ${gb(m.commit_limit)} GB`),
       kv('Kernel pools', `${gb(m.paged)} paged · ${gb(m.nonpaged)} non-paged GB`));
-    memSpark.draw([hist.mem]);
+    memSpark.draw([hist.mem], n);
   });
   const memCard = card('Memory', h('div', { class: 'mon-head' }, memBig, h('div', { class: 'mon-side' }, h('div', {}, memSide))),
     memSpark.el, memBar.el, memLegend, memRows);
@@ -191,14 +195,14 @@ function buildMonitor(body, st) {
     const gBig = txt('mon-big'), gSpark = spark([[]]), vram = bar([]), vramTxt = txt(), stats = h('div', { class: 'mon-stats' });
     const stat = (label, value, frac) => h('div', { class: 'mon-stat' }, h('div', { class: 'k' }, label), h('div', { class: 'v' }, value),
       frac == null ? null : bar([[frac, heat(frac * 100)]], 'thin').el);
-    up.push(({ cur, hist, slow }) => {
+    up.push(({ cur, hist, slow, n }) => {
       const g = cur.gpu, pw = sm('gpu_w', g.power_w);
       gBig.replaceChildren(String(Math.round(sm('gpu', g.util ?? 0))), h('small', {}, '%'));
-      gSpark.draw([hist.gpu]);
+      gSpark.draw([hist.gpu], n);
       if (g.vram_total) {
         vram.set([[g.vram_used / g.vram_total, 'var(--mon-cool)']]);
-        vramTxt.textContent = `VRAM ${gb(g.vram_used)} of ${gb(g.vram_total)} GB`;
-      } else vramTxt.textContent = g.vram_used ? `VRAM ${gb(g.vram_used)} GB in use` : '';
+        vramTxt.textContent = `VRAM ${gb(g.vram_used)} / ${gb(g.vram_total)} GB`;
+      } else vramTxt.textContent = g.vram_used ? `VRAM ${gb(g.vram_used)} GB` : '';
       stats.replaceChildren(...[
         g.temp != null && stat('Temperature', `${g.temp} °C`, g.temp / 90),
         pw != null && stat('Power', `${Math.round(pw)}${g.power_limit_w ? ` / ${Math.round(g.power_limit_w)}` : ''} W`, g.power_limit_w ? pw / g.power_limit_w : null),
@@ -217,22 +221,22 @@ function buildMonitor(body, st) {
   const two = { max: 0, colors: ['var(--mon-cool)', 'var(--mon-hot)'] };
   const dRates = h('div', { class: 'mon-rates' }), dSpark = spark([[], []], two), vols = h('div', { class: 'mon-vols' });
   let volsShown = null;
-  up.push(({ cur, hist, slow }) => {
+  up.push(({ cur, hist, slow, n }) => {
     const k = cur.disk;
     dRates.replaceChildren(h('span', { class: 'rd' }, `Read ${fmtRate(sm('dr', k.read, 0.15))}`), h('span', { class: 'wr' }, `Write ${fmtRate(sm('dw', k.write, 0.15))}`),
       k.active != null ? h('span', {}, `${Math.round(sm('da', k.active, 0.15))}% active`) : null);
-    dSpark.draw([hist.disk_r, hist.disk_w]);
+    dSpark.draw([hist.disk_r, hist.disk_w], n);
     if (slow.volumes && slow.volumes !== volsShown) {
       volsShown = slow.volumes;
       vols.replaceChildren(...slow.volumes.map(v => h('div', { class: 'mon-vol' },
-        h('div', { class: 'row1' }, h('b', {}, v.name), h('span', {}, v.label), h('span', { class: 'v' }, `${gb(v.total - v.used)} GB free of ${gb(v.total)}`)),
+        h('div', { class: 'row1' }, h('b', {}, v.name), h('span', {}, v.label), h('span', { class: 'v' }, `${gb(v.used)} / ${gb(v.total)} GB`)),
         bar([[v.used / v.total, heat(100 * v.used / v.total)]], 'thin').el)));
     }
   });
   const nRates = h('div', { class: 'mon-rates' }), nSpark = spark([[], []], two);
-  up.push(({ cur, hist }) => {
+  up.push(({ cur, hist, n }) => {
     nRates.replaceChildren(h('span', { class: 'rd' }, `↓ ${fmtRate(sm('rx', cur.net.rx, 0.15))}`), h('span', { class: 'wr' }, `↑ ${fmtRate(sm('tx', cur.net.tx, 0.15))}`));
-    nSpark.draw([hist.net_rx, hist.net_tx]);
+    nSpark.draw([hist.net_rx, hist.net_tx], n);
   });
   const diskCard = card('Disks', dRates, dSpark.el, vols);
   const netCard = card('Network', nRates, nSpark.el);
@@ -251,7 +255,7 @@ function buildMonitor(body, st) {
     const c = slow.counts || {};
     foot.textContent = [c.processes && `${c.processes} processes`, c.threads && `${c.threads.toLocaleString()} threads`,
       c.handles && `${c.handles.toLocaleString()} handles`, slow.uptime_s && `up ${fmtDuration(slow.uptime_s)}`,
-      slow.battery ? `battery ${slow.battery.percent}%${slow.battery.charging ? ' ⚡' : ''}` : null, 'updates 20× a second'].filter(Boolean).join(' · ');
+      slow.battery ? `battery ${slow.battery.percent}%${slow.battery.charging ? ' ⚡' : ''}` : null].filter(Boolean).join(' · ');
   });
   const procCard = card('Busiest apps', procs);
 

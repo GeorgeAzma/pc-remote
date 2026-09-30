@@ -370,9 +370,9 @@ export function scanQR(img) {
 
 // --------------------------------------------------------- in the browser ---
 let detector;
-/** An image, a bitmap or a video frame -> the QR code's text, or null.
- *  sizes: the longest sides to try it at (a camera photo is huge; a QR code in it is fine at a fraction of that). */
-export async function scanSource(src, sw, sh, sizes = [900, 1500, 600]) {
+/** A video frame (or an image) -> the QR code's text, or null. It's read at
+ *  most `max` pixels across: plenty for a QR code, and quick. */
+export async function scanSource(src, sw, sh, max = 720) {
   if (detector === undefined) {
     try { detector = 'BarcodeDetector' in window && (await BarcodeDetector.getSupportedFormats()).includes('qr_code')
       ? new BarcodeDetector({ formats: ['qr_code'] }) : null; } catch { detector = null; }
@@ -380,15 +380,10 @@ export async function scanSource(src, sw, sh, sizes = [900, 1500, 600]) {
   if (detector) {
     try { const r = await detector.detect(src); if (r[0]) return r[0].rawValue; } catch { /* fall through */ }
   }
-  for (const max of sizes) {
-    const k = Math.min(1, max / Math.max(sw, sh)), w = Math.round(sw * k), h = Math.round(sh * k);
-    const c = document.createElement('canvas');
-    c.width = w; c.height = h;
-    const ctx = c.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(src, 0, 0, w, h);
-    const text = scanQR(ctx.getImageData(0, 0, w, h));
-    if (text !== null) return text;
-    if (k === 1) break;
-  }
-  return null;
+  const k = Math.min(1, max / Math.max(sw, sh)), w = Math.round(sw * k), h = Math.round(sh * k);
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(src, 0, 0, w, h);
+  return scanQR(ctx.getImageData(0, 0, w, h));
 }

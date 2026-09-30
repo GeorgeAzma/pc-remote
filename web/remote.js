@@ -522,11 +522,11 @@ bus.addEventListener('layout', () => active && layout());
 // ====================================================== stream methods ===
 const MS = window.ManagedMediaSource || window.MediaSource;
 export const METHODS = [
-  { id: 'auto', name: 'Automatic', sub: 'The best method this browser supports' },
-  { id: 'h264', name: 'H.264', sub: 'Lowest latency · hardware decoded' },
-  { id: 'hevc', name: 'HEVC', sub: 'Same latency · ~30% less data for the same picture' },
-  { id: 'mse', name: 'Video player', sub: 'H.264 over plain HTTP · about 30–50 ms more delay' },
-  { id: 'jpeg', name: 'JPEG', sub: 'Works anywhere · sends only what changed; full-screen video uses much more data' },
+  { id: 'auto', name: 'Automatic', sub: 'The best one available' },
+  { id: 'h264', name: 'H.264', sub: 'Lowest latency' },
+  { id: 'hevc', name: 'HEVC', sub: 'Like H.264, ~30% less data' },
+  { id: 'mse', name: 'Video player', sub: 'Works over HTTP · 30–50 ms more delay' },
+  { id: 'jpeg', name: 'JPEG', sub: 'Works anywhere · heavy on full-screen video' },
 ];
 // '' = usable here, otherwise why not; null while still checking
 export const support = { auto: '', h264: null, hevc: null, mse: null, jpeg: null };
@@ -553,11 +553,11 @@ export const resolveMode = want => resolvePlan(want).mode;
 // The quality <-> latency slider (mirrors video.tuning() on the server).
 // Every level runs at the display's refresh rate; bitrate follows the link.
 export const QUALITY = [
-  { name: 'Fastest', sub: '3/4 resolution · smallest frames · lowest delay' },
-  { name: 'Smooth', sub: 'Quick encode · small frames' },
+  { name: 'Fastest', sub: '¾ resolution · lowest delay' },
+  { name: 'Smooth', sub: 'Quick encode' },
   { name: 'Balanced', sub: 'Good detail' },
-  { name: 'Sharp', sub: 'Full resolution · finer detail' },
-  { name: 'Sharpest', sub: 'Full resolution · best detail · a little more delay' },
+  { name: 'Sharp', sub: 'Full resolution' },
+  { name: 'Sharpest', sub: 'Full resolution · most detail · a bit more delay' },
 ];
 // Max bitrate steps (Mb/s); the last one is "no limit".
 const MAXBR = [2, 3, 5, 8, 12, 20, 30, 50, 80, 0];
@@ -653,7 +653,7 @@ const video = {
   start() {
     if (this.ws) return;
     if (INFO.error) { message(/Sign in/.test(INFO.error) ? 'Sign in to see the screen.' : 'Can’t reach the PC.'); return; }
-    if (!INFO.video?.ffmpeg) { message('Screen streaming needs <b>ffmpeg</b> on the PC.<br><code>winget install Gyan.FFmpeg</code> then restart the server.'); return; }
+    if (!INFO.video?.ffmpeg) { message('Streaming needs <b>ffmpeg</b> on the PC:<br><code>winget install Gyan.FFmpeg</code>, then restart PC Remote.'); return; }
     this.plan = resolvePlan();
     this.mode = this.plan.mode;  // what is actually streaming (the server may use plan.alt)
     this.ctx = this.ctx || canvas.getContext('2d', { alpha: false, desynchronized: true });
@@ -1242,8 +1242,8 @@ export function streamSettings() {
         h('div', { class: 'ends' }, h('span', {}, 'Lower latency'), h('span', {}, 'Sharper')), sub),
       h('div', { class: 'setting col' },
         h('div', { class: 'hd' }, h('span', {}, 'Max bitrate'), brName), br.el,
-        h('div', { class: 'd' }, 'Caps the stream’s data use, e.g. on mobile data. It always runs at full frame rate and uses as much of the link as it can, up to this.')),
-      swRow('Show stats', 'stats', 'Tap the status pill to toggle')));
+        h('div', { class: 'd' }, 'Limits data use, e.g. on mobile data.')),
+      swRow('Show stats', 'stats', 'Or tap the status pill')));
 }
 
 function settingsSheet() {
@@ -1254,7 +1254,7 @@ function settingsSheet() {
       slRow('Pointer speed', 'speed', 0.3, 3, 0.05, x),
       slRow('Acceleration', 'accel', 0, 1, 0.05, v => Math.round(v * 100) + '%'),
       slRow('Scroll speed', 'scroll', 0.3, 3, 0.05, x),
-      swRow('Natural scrolling', 'natural', 'Content follows your fingers'),
+      swRow('Natural scrolling', 'natural'),
       segRow('Touching the screen', 'touch', [['direct', 'Clicks'], ['trackpad', 'Trackpad']]),
       swRow('Haptics', 'haptics'),
       h('button', { class: 'list-row', onclick: () => { haptic(5); gestureSheet(); } },
@@ -1286,24 +1286,24 @@ function gestureSheet() {
       item(fingers(1), 'Tap', 'Click. Tap twice to double-click.'),
       item(fingers(2), 'Two-finger tap', 'Right-click.'),
       item(fingers(3), 'Three-finger tap', 'Middle-click.'),
-      item(fingers(1, 'hold'), 'Hold, or tap then drag', 'Drag: holds the left button down.'),
-      item(fingers(2, 'scroll'), 'Two-finger drag', 'Scroll. Flick to keep it gliding.'),
-      item(fingers(3, 'swipe'), 'Three-finger swipe', 'Up: Task view. Down: show desktop. Left / right: switch app.')]),
+      item(fingers(1, 'hold'), 'Hold, or tap then drag', 'Drag.'),
+      item(fingers(2, 'scroll'), 'Two-finger drag', 'Scroll. Flick to glide.'),
+      item(fingers(3, 'swipe'), 'Three-finger swipe', 'Up: Task view · down: desktop · sideways: switch app.')]),
     ...group('Picture', [
       item(fingers(1), 'Tap', 'Click exactly there.'),
       item(fingers(1, 'hold'), 'Hold', 'Right-click there.'),
       item(fingers(1, 'drag'), 'Drag', 'Drag there.'),
-      item(fingers(2, 'pinch'), 'Pinch', 'Zoom in; the stream gets sharper as you zoom. Tap 1× to zoom back out.'),
+      item(fingers(2, 'pinch'), 'Pinch', 'Zoom (the picture gets sharper). Tap 1× to reset.'),
       h('div', { class: 'foot', style: 'text-align:left;margin:0;padding:8px 14px 12px' },
-        'Prefer the picture to act as a trackpad? Settings → Touching the screen → Trackpad.')]),
+        'Want the picture to act as a trackpad? Settings → Touching the screen.')]),
     ...group('Keyboard', [
-      item(keycap('Aa'), 'Type on PC', 'Everything you type goes to the PC as you type, including autocorrect, swipe typing and dictation.'),
-      item(keycap('⌘'), 'Key bar', 'Empty until you fill it: in ⌘, tap the pin next to any shortcut, key (Esc, arrows, F-keys…) or modifier. Hold a key in the bar to remove it.'),
-      item(keycap('Ctrl'), 'Ctrl, Alt, ⇧, ⊞', 'Pinned modifiers: tap for the next key only; tap twice to keep it held.'),
-      item(keycap('⌨'), 'On a computer', 'Click the picture, then type: your keyboard goes straight to the PC.')]),
+      item(keycap('Aa'), 'Type on PC', 'Goes to the PC as you type, with autocorrect, swipe and dictation.'),
+      item(keycap('⌘'), 'Key bar', 'In ⌘, tap the pin next to a shortcut or key to add it here. Hold a key in the bar to remove it.'),
+      item(keycap('Ctrl'), 'Ctrl, Alt, ⇧, ⊞', 'Tap: for the next key. Tap twice: stays held.'),
+      item(keycap('⌨'), 'On a computer', 'Click the picture, then type on your keyboard.')]),
     ...group('Panel', [
-      item(fingers(1, 'drag'), 'Grab bar', 'Drag it to resize the panel. Tap it to hide the panel and go full screen.'),
-      item(keycap('⋯'), 'Views', 'Switch between Remote, Terminal, Controls and System with the icons at the top.')])) });
+      item(fingers(1, 'drag'), 'Grab bar', 'Drag to resize. Tap to hide the panel and go full screen.'),
+      item(keycap('⋯'), 'Views', 'Switch views with the icons at the top.')])) });
 }
 $('btn-settings').addEventListener('click', () => { haptic(5); settingsSheet(); });
 

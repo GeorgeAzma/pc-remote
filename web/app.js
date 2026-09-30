@@ -37,12 +37,14 @@ export async function run(cmd, args = {}) {
 }
 /** The key a signed-in device holds (it changes when all devices are signed out). */
 export function setToken(k) { TOKEN = k; store('token', k); }
-let asking = false, signInPill = null;
-export function signIn() {
+let asking = false, signInPill = null, canScan = false;
+export async function signIn() {
   if (asking) return;
   asking = true;
+  const auth = await fetch(new URL('/api/auth', location.origin)).then(r => r.json()).catch(() => ({}));
+  canScan = window.isSecureContext ? !!navigator.mediaDevices?.getUserMedia : !!auth.https;
   signInPill?.classList.add('hidden');
-  const inp = h('input', { class: 'input', type: 'password', placeholder: 'Access code or password',
+  const inp = h('input', { class: 'input', type: 'password', placeholder: 'Code or password',
     autocomplete: 'current-password', autocapitalize: 'off', spellcheck: 'false', enterkeyhint: 'go' });
   const go = async () => {
     let r, d = {};
@@ -57,9 +59,9 @@ export function signIn() {
   };
   inp.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
   sheet({ title: 'Sign in', body: h('div', { class: 'form' },
-    h('div', { class: 'note' }, 'Scan the QR code the PC shows (open PC Remote on it), or type its access code or your password.'),
-    h('button', { class: 'btn', onclick: () => scanSheet() }, ico('camera'), 'Scan the QR code'),
-    inp, h('button', { class: 'btn gray', onclick: go }, 'Sign in')),
+    h('div', { class: 'note' }, 'Open PC Remote on the PC, then scan its QR code or enter its code.'),
+    canScan ? h('button', { class: 'btn', onclick: () => scanSheet() }, ico('camera'), 'Scan the QR code') : null,
+    inp, h('button', { class: 'btn' + (canScan ? ' gray' : ''), onclick: go }, 'Sign in')),
     onClose: () => {
       asking = false;
       // closed without signing in: keep a way back, since nothing else works yet
@@ -67,56 +69,49 @@ export function signIn() {
       hydrateIcons(signInPill);
       signInPill.classList.remove('hidden');
     } });
+  if (canScan && window.isSecureContext && new URLSearchParams(location.search).has('scan')) {
+    history.replaceState(null, '', location.pathname);  // (came here from the plain address to scan)
+    scanSheet();
+  } else if (!canScan || !window.isSecureContext) setTimeout(() => inp.focus(), 300);
 }
 
-// Scan the PC's pairing QR code (it holds the address and the key). A live
-// camera needs a secure page (HTTPS); on plain HTTP the phone takes a photo.
+// Scan the PC's pairing QR code (it holds the address and the key) with the
+// live camera. Browsers only allow that on secure pages, so from the plain
+// address this goes to the secure one first (same port) and scans there.
 async function scanSheet() {
+  if (!window.isSecureContext) {
+    location.href = `https://${location.host}${location.pathname}?scan`;
+    return;
+  }
   let s = null, stream = null, live = true;
   const done = async text => {
     let key = null;
     try { key = new URL(text).searchParams.get('token'); } catch { /* not a link */ }
-    if (!key) { toast(/^https?:/.test(text) ? 'That QR code has no sign-in in it (sign-in is off?)' : 'That isn\u2019t a PC Remote QR code', { err: true, always: true }); return false; }
+    if (!key) { toast(/^https?:/.test(text) ? 'This QR code has no sign-in key' : 'Not a PC Remote QR code', { err: true, always: true }); return false; }
     const r = await fetch(new URL('/api/auth', location.origin), { headers: { 'X-Token': key } }).then(r => r.json()).catch(() => null);
-    if (!r || r.required) { toast('That QR code is from another PC, or out of date', { err: true, always: true }); return false; }
+    if (!r || r.required) { toast('This QR code is old or from another PC', { err: true, always: true }); return false; }
     setToken(key);
     haptic(10);
     location.reload();
     return true;
   };
-  const photo = h('input', { type: 'file', accept: 'image/*', capture: 'environment', style: 'display:none', onchange: async () => {
-    const f = photo.files[0];
-    photo.value = '';
-    if (!f) return;
-    const { scanSource } = await import('./qrscan.js');
-    let text = null;
-    try { const bmp = await createImageBitmap(f); text = await scanSource(bmp, bmp.width, bmp.height); bmp.close?.(); } catch { /* unreadable */ }
-    if (text === null) toast('No QR code found: fill the frame with it and try again', { err: true, always: true });
-    else if (await done(text)) s?.close();
-  } });
-  document.body.append(photo);
-  // (still inside the tap, which the photo picker needs)
-  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) { photo.click(); setTimeout(() => photo.remove(), 60000); return; }
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
-  } catch {  // no camera permission: a photo still works
-    s = sheet({ title: 'Scan the QR code', body: h('div', { class: 'form' },
-      h('div', { class: 'note' }, 'The camera isn’t available here. Take a photo of the QR code instead.'),
-      h('button', { class: 'btn', onclick: () => photo.click() }, 'Take a photo')), onClose: () => photo.remove() });
+  } catch {
+    toast('Allow the camera to scan, or enter the code', { err: true, always: true });
     return;
   }
   const video = h('video', { playsinline: true, muted: true, autoplay: true });
   video.srcObject = stream;
   s = sheet({ title: 'Scan the QR code', body: h('div', { class: 'form' },
     h('div', { class: 'scan' }, video),
-    h('div', { class: 'foot', style: 'margin:0' }, 'Point the camera at the QR code on the PC.'),
-    h('button', { class: 'btn gray', onclick: () => photo.click() }, 'Take a photo instead')),
-    onClose: () => { live = false; stream.getTracks().forEach(t => t.stop()); photo.remove(); } });
+    h('div', { class: 'foot', style: 'margin:0' }, 'Point the camera at the QR code on the PC.')),
+    onClose: () => { live = false; stream.getTracks().forEach(t => t.stop()); } });
   const { scanSource } = await import('./qrscan.js');
   while (live) {
     await new Promise(r => setTimeout(r, 150));
     if (!live || video.readyState < 2) continue;
-    const text = await scanSource(video, video.videoWidth, video.videoHeight, [720]);
+    const text = await scanSource(video, video.videoWidth, video.videoHeight);
     if (text !== null && live && await done(text)) { s.close(); return; }
     if (text !== null) await new Promise(r => setTimeout(r, 1500));  // (a wrong code: don't repeat the message 7 times a second)
   }

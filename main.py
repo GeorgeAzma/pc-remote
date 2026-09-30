@@ -266,7 +266,7 @@ class Handler(BaseHTTPRequestHandler):
             certs.ensure()
             return self._file(certs.CA_CERT, "application/x-x509-ca-cert", attachment="pc-remote-ca.crt")
         if route == "/api/auth":  # public: does this device need to sign in?
-            return self._json(200, {"required": not self._authorized(query, reply=False)})
+            return self._json(200, {"required": not self._authorized(query, reply=False), "https": bool(self.server.tls)})
         if not self._authorized(query):
             return
         if route == "/api/security":
@@ -543,6 +543,11 @@ def main():
     log.info("PC Remote on http://%s:%d/%s", ips[0], PORT, "  (HTTPS on the same port)" if server.tls else "")
     if not video.FFMPEG:
         log.warning("ffmpeg not found - screen streaming disabled (winget install Gyan.FFmpeg)")
+    try:
+        import winrt.runtime  # noqa: F401
+    except ImportError:
+        log.warning("winrt isn't installed for %s - no Wi-Fi/Bluetooth toggles or volume (pip install -r requirements.txt)",
+                    sys.executable)
     if not TOKEN and not auth.required():
         log.warning("sign-in is off - anyone who can reach this PC can control it")
     try:
