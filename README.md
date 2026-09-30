@@ -80,7 +80,10 @@ Drag the grab bar between the picture and the panel to resize the panel
 size to hide it. For watching videos, tap the bar: the panel (trackpad, keys
 and text field) slides away and the browser goes full screen. The bar then
 waits at the screen edge; tap it, drag it out, or press Esc to bring the
-panel back. The ⌄ at the end of the tab bar folds it down to a similar bar.
+panel back.
+
+The tabs are small floating buttons in the bottom-right corner, so they take
+no room; ⌄ folds them into a small bar (tap it to bring them back).
 The picture still takes taps and your physical keyboard (or works as the
 trackpad, see *Touching the screen* in Settings).
 
@@ -90,12 +93,14 @@ Pointer motion uses a velocity curve: slow strokes are precise, and a quick
 flick crosses the whole screen.
 
 **Keyboard.** Whatever you type in the *Type on PC* field goes to the PC as
-you type, including autocorrect, swipe typing and dictation. `Ctrl`, `Alt`,
-`⇧` and `⊞` are sticky: tap one, then a key (tap twice to lock it). ⌘ opens
-a searchable shortcut list, where you can also type any combo such as
-`ctrl+shift+esc`. Tap the pin next to a shortcut to add it to the key bar;
-hold a key there to remove it again. On a computer,
-click the screen image to send your physical keyboard straight to the PC.
+you type, including autocorrect, swipe typing and dictation. ⌘ opens a
+searchable list of shortcuts, keys (Esc, arrows, F-keys, …) and modifiers,
+where you can also type any combo such as `ctrl+shift+esc`. The key bar
+above the text field starts empty: tap the pin next to anything in that
+list to add it, and hold a key in the bar to remove it. Pinned `Ctrl`,
+`Alt`, `⇧` and `⊞` are sticky: tap one, then a key (tap twice to lock it).
+On a computer, click the screen image to send your physical keyboard
+straight to the PC.
 
 ## How the stream works
 

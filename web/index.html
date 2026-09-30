@@ -42,15 +42,15 @@
           <span>Tap to click</span><span>Two fingers scroll · right-click</span><span>Hold to drag</span>
         </div>
       </div>
-      <div class="clip-pill hidden" id="clip-pill">
+      <div class="clip-pill hidden" id="clip-pill" data-dock-above>
         <span class="clip-ico" data-icon="clipboard"></span>
         <span class="clip-text" id="clip-text"></span>
         <button class="clip-btn" id="clip-copy">Copy</button>
         <button class="clip-x" id="clip-x" aria-label="Dismiss" data-icon="x"></button>
       </div>
       <button class="grip" id="panel-grip" aria-label="Hide trackpad and keys"></button>
-      <div class="keystrip" id="keystrip" role="toolbar" aria-label="Keys"></div>
-      <div class="inputbar">
+      <div class="keystrip hidden" id="keystrip" role="toolbar" aria-label="Keys" data-dock-above></div>
+      <div class="inputbar" data-dock-above>
         <label class="field">
           <span class="field-ico" data-icon="keyboard"></span>
           <input id="kb" type="text" placeholder="Type on PC" autocomplete="off" autocorrect="off"
@@ -78,7 +78,7 @@
         <textarea id="term-input" class="term-input" autocomplete="off" autocorrect="off"
                   autocapitalize="off" spellcheck="false" aria-label="Terminal input"></textarea>
       </div>
-      <div class="accbar" id="term-acc" role="toolbar" aria-label="Terminal keys"></div>
+      <div class="accbar" id="term-acc" role="toolbar" aria-label="Terminal keys" data-dock-above></div>
     </div>
   </section>
 
@@ -88,13 +88,13 @@
   </section>
 </div>
 
-<nav class="tabbar" id="tabbar">
+<nav class="dock" id="tabbar" aria-label="Tabs">
   <button data-tab="remote" aria-label="Remote" title="Remote"><span data-icon="trackpad"></span></button>
   <button data-tab="term" aria-label="Terminal" title="Terminal"><span data-icon="terminal"></span></button>
   <button data-tab="controls" aria-label="Controls" title="Controls"><span data-icon="controls"></span></button>
-  <button class="tabs-hide" id="tabs-hide" aria-label="Hide tab bar" title="Hide tab bar" data-icon="chevdown"></button>
+  <button class="tabs-hide" id="tabs-hide" aria-label="Hide tabs" title="Hide tabs" data-icon="chevdown"></button>
 </nav>
-<button class="grip h up tabs-handle" id="tabs-show" aria-label="Show tab bar" title="Show tab bar"></button>
+<button class="grip h up tabs-handle" id="tabs-show" aria-label="Show tabs" title="Show tabs"></button>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div class="sheets" id="sheets"></div>

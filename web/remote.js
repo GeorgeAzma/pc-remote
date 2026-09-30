@@ -1,7 +1,7 @@
 // Remote tab: live screen (WebCodecs H.264 or MJPEG), cursor overlay with
 // local prediction, trackpad + direct-touch gestures, live keyboard.
 import { settings, setSetting, bus, h, ico, toast, haptic, sheet, url, wsUrl, INFO, Slider, toggle,
-         copyToDevice } from './app.js';
+         copyToDevice, placeDock } from './app.js';
 import { hydrateIcons } from './icons.js';
 
 const $ = id => document.getElementById(id);
@@ -412,6 +412,7 @@ function layout() {
     setView(view.s, view.tx, view.ty);
   }
   placeGrip(root, side, noPanel, typing);
+  placeDock();
 }
 new ResizeObserver(() => layout()).observe(stage.parentElement);
 // The panel's grab bar: in the gap between the picture and the panel, or at
@@ -967,38 +968,51 @@ function sendKey(name) {
   input.send({ t: 'combo', s: [...m, name].join('+') });
   consumeMods();
 }
+// Single keys you can pin to the key bar: [chip label, key name, full name].
 const KEYS = [
-  ['Esc', 'esc'], ['Tab', 'tab'], ['←', 'left'], ['↑', 'up'], ['↓', 'down'], ['→', 'right'], ['⌫', 'backspace'],
-  ['Del', 'delete'], ['Home', 'home'], ['End', 'end'], ['PgUp', 'pageup'], ['PgDn', 'pagedown'],
-  ...Array.from({ length: 12 }, (_, i) => ['F' + (i + 1), 'f' + (i + 1)]), ['PrtSc', 'printscreen'], ['Ins', 'insert'],
+  ['Esc', 'esc', 'Escape'], ['Tab', 'tab', 'Tab'], ['⏎', 'enter', 'Enter'], ['Space', 'space', 'Space'],
+  ['←', 'left', 'Left arrow'], ['↑', 'up', 'Up arrow'], ['↓', 'down', 'Down arrow'], ['→', 'right', 'Right arrow'],
+  ['⌫', 'backspace', 'Backspace'], ['Del', 'delete', 'Delete'], ['Home', 'home', 'Home'], ['End', 'end', 'End'],
+  ['PgUp', 'pageup', 'Page up'], ['PgDn', 'pagedown', 'Page down'],
+  ...Array.from({ length: 12 }, (_, i) => ['F' + (i + 1), 'f' + (i + 1), 'F' + (i + 1)]),
+  ['PrtSc', 'printscreen', 'Print Screen'], ['Ins', 'insert', 'Insert'],
 ];
+const MOD_NAME = { ctrl: 'Ctrl', alt: 'Alt', shift: 'Shift', win: 'Windows key' };
+// A pin is a combo ('ctrl+c'), a single key ('esc': takes the held modifiers)
+// or a held modifier ('mod:ctrl').
+const pinKey = c => KEYS.find(k => k[1] === c);
+const pinMod = c => c.startsWith('mod:') && MODS.includes(c.slice(4)) ? c.slice(4) : null;
+const pinLabel = c => pinMod(c) ? MOD_LABEL[pinMod(c)] : pinKey(c)?.[0] || prettyCombo(c);
+const pinName = c => pinMod(c) ? MOD_NAME[pinMod(c)] : pinKey(c)?.[2] || shortcutName(c) || prettyCombo(c);
+function pressModifier(m) {
+  const now = performance.now();
+  // tap: the next key only, double-tap: locked, tap again: off
+  modState[m] = modState[m] ? (now - (modTapT[m] || 0) < 350 && modState[m] === 1 ? 2 : 0) : 1;
+  modTapT[m] = now;
+  haptic(6);
+  renderMods();
+}
+const modTapT = {};
+function firePin(c) {
+  if (pinMod(c)) pressModifier(pinMod(c));
+  else if (pinKey(c)) { haptic(5); sendKey(c); }
+  else { haptic(6); sendCombo(c); }
+}
+// The key bar holds only what you pinned from the ⌘ list (hold a key to unpin
+// it); with nothing pinned it takes no room at all.
 function renderStrip() {
-  const kids = [];
-  for (const m of MODS) {
-    let tapT = 0;
-    kids.push(h('button', { class: 'chip mod', 'data-mod': m, onclick: () => {
-      const now = performance.now();
-      // tap: one-shot, double-tap: lock, tap again: off
-      modState[m] = modState[m] ? (now - tapT < 350 && modState[m] === 1 ? 2 : 0) : 1;
-      tapT = now;
-      haptic(6);
-      renderMods();
-    } }, MOD_LABEL[m]));
-  }
-  kids.push(h('span', { class: 'chip sep' }));
-  // Shortcuts pinned from the ⌘ list; hold one to unpin it.
-  for (const c of settings.pins) {
-    const b = h('button', { class: 'chip recent', title: shortcutName(c) || prettyCombo(c) }, prettyCombo(c));
+  const kids = settings.pins.filter(c => !c.startsWith('mod:') || pinMod(c)).map(c => {
+    const m = pinMod(c);
+    const b = h('button', { class: m ? 'chip mod' : pinKey(c) ? 'chip' : 'chip recent', title: pinName(c), 'data-mod': m || null }, pinLabel(c));
     let holdT = 0, held = false;
     b.addEventListener('pointerdown', () => { held = false; holdT = setTimeout(() => { held = true; haptic(15); togglePin(c); }, 550); });
     for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) b.addEventListener(ev, () => clearTimeout(holdT));
-    b.addEventListener('click', () => { if (!held) { haptic(6); sendCombo(c); } });
+    b.addEventListener('click', () => { if (!held) firePin(c); });
     b.addEventListener('contextmenu', e => e.preventDefault());
-    kids.push(b);
-  }
-  if (settings.pins.length) kids.push(h('span', { class: 'chip sep' }));
-  for (const [label, name] of KEYS) kids.push(h('button', { class: 'chip', onclick: () => { haptic(5); sendKey(name); } }, label));
+    return b;
+  });
   strip.replaceChildren(...kids);
+  strip.classList.toggle('hidden', !kids.length);
   renderMods();
 }
 const prettyCombo = c => c.split('+').map(p => ({ ctrl: 'Ctrl', alt: 'Alt', shift: '⇧', win: '⊞', esc: 'Esc',
@@ -1011,7 +1025,7 @@ function sendCombo(c) {
 function togglePin(c) {
   const on = !settings.pins.includes(c);
   setSetting('pins', on ? [...settings.pins, c] : settings.pins.filter(x => x !== c));
-  toast(on ? `${prettyCombo(c)} added to the key bar` : `${prettyCombo(c)} removed from the key bar`, { ic: on ? 'pinned' : 'pin', ms: 1400 });
+  toast(on ? `${pinLabel(c)} added to the key bar` : `${pinLabel(c)} removed from the key bar`, { ic: on ? 'pinned' : 'pin', ms: 1400 });
   renderStrip();
   layout();
 }
@@ -1101,13 +1115,19 @@ function shortcutSheet() {
     autocapitalize: 'off', spellcheck: 'false', enterkeyhint: 'send' });
   const list = h('div', { class: 'card' });
   const s = sheet({ title: 'Shortcuts', body: h('div', { class: 'form' }, q, list) });
-  const fire = c => { haptic(8); sendCombo(c); s.close(); toast(prettyCombo(c), { ic: 'command', ms: 900 }); };
-  // A row sends its shortcut; the pin on the right adds it to (or removes it from) the key bar.
+  const fire = c => {
+    s.close();
+    if (pinMod(c)) { modState[pinMod(c)] = 1; renderMods(); toast(`${MOD_NAME[pinMod(c)]} held for the next key`, { ic: 'command', ms: 1200 }); return; }
+    haptic(8);
+    if (pinKey(c)) sendKey(c); else sendCombo(c);
+    toast(pinLabel(c), { ic: 'command', ms: 900 });
+  };
+  // A row sends its key / shortcut; the pin on the right adds it to (or removes it from) the key bar.
   const line = (n, c, icn) => {
     const pinned = settings.pins.includes(c), tip = pinned ? 'Remove from the key bar' : 'Add to the key bar';
     return h('div', { class: 'list-row sc' },
       h('button', { class: 'sc-go', onclick: () => fire(c) },
-        icn ? ico(icn, 'ic') : null, h('span', { class: 'nm' }, n), h('span', { class: 'k' }, prettyCombo(c))),
+        icn ? ico(icn, 'ic') : null, h('span', { class: 'nm' }, n), h('span', { class: 'k' }, pinLabel(c))),
       h('button', { class: 'sc-pin' + (pinned ? ' on' : ''), 'aria-label': tip, title: tip,
         onclick: () => { haptic(6); togglePin(c); render(); } }, ico(pinned ? 'pinned' : 'pin')));
   };
@@ -1115,14 +1135,18 @@ function shortcutSheet() {
   const render = () => {
     const t = q.value.trim().toLowerCase();
     const hit = (n, c) => !t || n.toLowerCase().includes(t) || c.includes(t.replace(/\s/g, ''));
-    const named = c => shortcutName(c) || prettyCombo(c);
-    const pins = settings.pins.filter(c => hit(named(c), c));
-    const recent = settings.recents.filter(c => !settings.pins.includes(c) && hit(named(c), c)).slice(0, 5);
-    const rest = SHORTCUTS.filter(([n, c]) => !settings.pins.includes(c) && !recent.includes(c) && hit(n, c));
-    const rows = [...group('In the key bar', pins.map(c => line(named(c), c))),
-                  ...group('Recent', recent.map(c => line(named(c), c, 'restart'))),
-                  ...group(t ? 'Matches' : 'All shortcuts', rest.slice(0, 60).map(([n, c]) => line(n, c)))];
-    if (/^[a-z0-9]+(\+[a-z0-9.,/;'`[\]\\=-]+)+$|^f\d\d?$/.test(t) && ![...settings.pins, ...SHORTCUTS.map(x => x[1])].includes(t))
+    const unpinned = c => !settings.pins.includes(c);
+    const pins = settings.pins.filter(c => hit(pinName(c), c));
+    const recent = settings.recents.filter(c => unpinned(c) && hit(pinName(c), c)).slice(0, 5);
+    const mods = MODS.map(m => 'mod:' + m).filter(c => unpinned(c) && hit(pinName(c), c));
+    const keys = KEYS.filter(([, c, n]) => unpinned(c) && hit(n, c));
+    const rest = SHORTCUTS.filter(([n, c]) => unpinned(c) && !recent.includes(c) && hit(n, c));
+    const rows = [...group('In the key bar', pins.map(c => line(pinName(c), c))),
+                  ...group('Recent', recent.map(c => line(pinName(c), c, 'restart'))),
+                  ...group(t ? 'Shortcuts' : 'All shortcuts', rest.slice(0, 60).map(([n, c]) => line(n, c))),
+                  ...group('Modifiers', mods.map(c => line(pinName(c), c))),
+                  ...group('Keys', keys.map(([, c, n]) => line(n, c)))];
+    if (/^[a-z0-9]+(\+[a-z0-9.,/;'`[\]\\=-]+)+$|^f\d\d?$/.test(t) && ![...settings.pins, ...SHORTCUTS.map(x => x[1]), ...KEYS.map(x => x[1])].includes(t))
       rows.unshift(line('Send', t, 'command'));
     list.replaceChildren(...(rows.length ? rows : [h('div', { class: 'empty' }, 'No match')]));
     hydrateIcons(list);
@@ -1274,12 +1298,12 @@ function gestureSheet() {
         'Prefer the picture to act as a trackpad? Settings → Touching the screen → Trackpad.')]),
     ...group('Keyboard', [
       item(keycap('Aa'), 'Type on PC', 'Everything you type goes to the PC as you type, including autocorrect, swipe typing and dictation.'),
-      item(keycap('Ctrl'), 'Ctrl, Alt, ⇧, ⊞', 'Tap for the next key only; tap twice to keep it held.'),
-      item(keycap('⌘'), 'Shortcuts', 'Search or type any combo. Tap the pin to add it to the key bar; hold a key there to remove it.'),
+      item(keycap('⌘'), 'Key bar', 'Empty until you fill it: in ⌘, tap the pin next to any shortcut, key (Esc, arrows, F-keys…) or modifier. Hold a key in the bar to remove it.'),
+      item(keycap('Ctrl'), 'Ctrl, Alt, ⇧, ⊞', 'Pinned modifiers: tap for the next key only; tap twice to keep it held.'),
       item(keycap('⌨'), 'On a computer', 'Click the picture, then type: your keyboard goes straight to the PC.')]),
     ...group('Panel', [
       item(fingers(1, 'drag'), 'Grab bar', 'Drag it to resize the panel. Tap it to hide the panel and go full screen.'),
-      item(keycap('⌄'), 'Tab bar', 'The ⌄ at its end folds it away; tap the bar at the bottom to bring it back.')])) });
+      item(keycap('⌄'), 'Tabs', 'The floating tab buttons fold into a small bar with ⌄; tap the bar to bring them back.')])) });
 }
 $('btn-settings').addEventListener('click', () => { haptic(5); settingsSheet(); });
 

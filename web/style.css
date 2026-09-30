@@ -15,11 +15,11 @@
   --purple: #bf5af2; --teal: #64d2ff; --indigo: #5e5ce6; --pink: #ff375f; --gray: #8e8e93;
   --bar: rgba(22,22,24,.78);
   --pad: #0e0e10;
+  --toggle-on: #596171;   /* switches: grey with a faint blue, a step above the surface */
   --shadow: 0 10px 40px rgba(0,0,0,.45);
   --r: 14px;
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", Roboto, system-ui, sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Cascadia Code", Menlo, Consolas, monospace;
-  --tabbar-h: 44px;
   --safe-b: env(safe-area-inset-bottom, 0px);
   --safe-t: env(safe-area-inset-top, 0px);
   --app-h: 100dvh;
@@ -32,7 +32,7 @@
     --sep: rgba(60,60,67,.29); --label: #000; --label2: rgba(60,60,67,.62); --label3: rgba(60,60,67,.3);
     --tint: #007aff; --green: #34c759; --red: #ff3b30; --orange: #ff9500; --yellow: #ffcc00;
     --purple: #af52de; --teal: #30b0c7; --indigo: #5856d6; --pink: #ff2d55;
-    --bar: rgba(249,249,251,.82); --pad: #e4e4ea; --shadow: 0 10px 40px rgba(0,0,0,.18);
+    --bar: rgba(249,249,251,.82); --pad: #e4e4ea; --toggle-on: #9ba5b7; --shadow: 0 10px 40px rgba(0,0,0,.18);
     color-scheme: light;
   }
 }
@@ -53,25 +53,26 @@ svg.i { width: 1em; height: 1em; display: block; fill: none; stroke: currentColo
 
 /* ---------------- shell ---------------- */
 #app { position: fixed; left: 0; right: 0; top: 0; height: var(--app-h);
-  padding-top: var(--safe-t); padding-bottom: calc(var(--tabbar-h) + var(--safe-b)); }
+  padding-top: var(--safe-t); padding-bottom: var(--safe-b); }
 body.kb-open #app { padding-bottom: 0; }
-.view { position: absolute; left: 0; right: 0; top: var(--safe-t); bottom: calc(var(--tabbar-h) + var(--safe-b));
-  display: none; }
-/* folded tab bar: only a slim strip with a grab handle remains */
-body.tabs-off #app { padding-bottom: calc(12px + var(--safe-b)); }
-body.tabs-off .view { bottom: calc(12px + var(--safe-b)); }
-body.tabs-off .tabbar { display: none; }
+.view { position: absolute; left: 0; right: 0; top: var(--safe-t); bottom: var(--safe-b); display: none; }
 body.kb-open .view { bottom: 0; }
 .view.active { display: block; }
-.tabbar { position: fixed; left: 0; right: 0; bottom: 0; height: calc(var(--tabbar-h) + var(--safe-b));
-  padding-bottom: var(--safe-b); display: flex; background: var(--bar); border-top: .5px solid var(--sep);
-  backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); z-index: 20; }
-body.kb-open .tabbar { display: none; }
-.tabbar button { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 2px; color: var(--gray); transition: color .15s; }
-.tabbar button span { font-size: 24px; }
-.tabbar button.active { color: var(--tint); }
-.tabbar .tabs-hide { flex: none; width: 44px; font-size: 18px; color: var(--label3); }
+/* Tabs: a small floating glass dock in the bottom-right corner, taking no
+   room of its own. It sits just above the view's bottom controls (the
+   remote's text field, the terminal's key row: --dock-b, set in app.js);
+   ⌄ folds it into a ribbon. */
+.dock { position: fixed; right: calc(10px + env(safe-area-inset-right, 0px)); bottom: calc(var(--dock-b, 10px) + var(--safe-b));
+  z-index: 20; display: flex; gap: 2px; padding: 4px; border-radius: 16px; background: var(--bar);
+  border: .5px solid var(--sep); box-shadow: 0 6px 24px rgba(0,0,0,.35);
+  backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); }
+body.kb-open .dock, body.tabs-off .dock { display: none; }
+.dock button { width: 38px; height: 34px; border-radius: 12px; display: grid; place-items: center; color: var(--label2);
+  transition: color .15s, background .15s; }
+.dock button span { font-size: 20px; }
+.dock button.active { color: var(--tint); background: var(--fill2); }
+.dock button:active { background: var(--fill); }
+.dock .tabs-hide { width: 28px; font-size: 15px; color: var(--label3); }
 /* Grab bars that fold a panel away / bring it back: a soft ribbon in the
    panel's own colour, a little lighter, so it reads as part of the panel */
 .grip { position: absolute; z-index: 6; touch-action: none; --grip: color-mix(in srgb, var(--pad) 84%, var(--label)); }
@@ -85,11 +86,11 @@ body.kb-open .tabbar { display: none; }
 .grip:hover, .grip:focus-visible, .grip.dragging { --grip: color-mix(in srgb, var(--pad) 72%, var(--label)); }
 .grip.v:hover::after, .grip.v.dragging::after { transform: scaleY(1.15); }
 .grip.h:hover::after, .grip.h.dragging::after { transform: scaleX(1.15); }
-.tabs-handle { cursor: pointer !important; display: none; position: fixed; left: 50%; top: auto; bottom: var(--safe-b); margin: 0 0 0 -40px; z-index: 20; }
+/* the folded dock: a ribbon where the dock was */
+.tabs-handle { cursor: pointer !important; display: none; position: fixed; left: auto; top: auto; margin: 0; z-index: 20;
+  right: calc(24px + env(safe-area-inset-right, 0px)); bottom: calc(var(--dock-b, 10px) + var(--safe-b)); }
 body.tabs-off .tabs-handle { display: block; }
 body.kb-open .tabs-handle { display: none; }
-/* stacked theater: the panel's bar sits at the bottom edge; reveal the panel first, then the tabs */
-body.theater.theater-b .tabs-handle { display: none; }
 
 /* ---------------- common controls ---------------- */
 .icon-btn { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; font-size: 20px;
@@ -108,8 +109,7 @@ body.theater.theater-b .tabs-handle { display: none; }
 .switch i { position: absolute; inset: 0; border-radius: 16px; background: var(--fill); transition: background .2s; }
 .switch i::after { content: ""; position: absolute; left: 2px; top: 2px; width: 27px; height: 27px; border-radius: 50%;
   background: #fff; box-shadow: 0 3px 8px rgba(0,0,0,.15), 0 1px 1px rgba(0,0,0,.16); transition: transform .22s cubic-bezier(.3,.7,.4,1.1); }
-/* on: the app's blue, muted toward the surface so it doesn't shout */
-.switch input:checked + i { background: color-mix(in srgb, var(--tint) 58%, var(--bg4)); }
+.switch input:checked + i { background: var(--toggle-on); }
 .switch input:checked + i::after { transform: translateX(20px); }
 .switch.unknown i { opacity: .45; }
 
@@ -145,7 +145,7 @@ body.theater.theater-b .tabs-handle { display: none; }
 .stage-msg code { font: 12px var(--mono); background: rgba(255,255,255,.1); padding: 2px 6px; border-radius: 5px; }
 .pad { position: relative; flex: 1 1 auto; min-height: 110px; border-radius: 16px; background: var(--pad);
   touch-action: none; user-select: none; -webkit-user-select: none; outline: none; overflow: hidden;
-  border: .5px solid var(--sep); }
+  border: 2px solid color-mix(in srgb, var(--pad) 90%, var(--label)); }  /* the pad's own colour, a little lighter */
 .pad:focus-visible { box-shadow: 0 0 0 2px var(--tint); }
 body.kb-open .pad { display: none; }
 /* panel hidden: only the picture, centred */
@@ -154,8 +154,6 @@ body.kb-open .pad { display: none; }
 /* theater (Remote with the panel hidden): edge to edge, black bars, the tab handle floats over the picture */
 body.theater { background: #000; }
 body.theater .remote { padding: 0; }
-body.theater.tabs-off #app { padding-bottom: var(--safe-b); }
-body.theater.tabs-off .view { bottom: var(--safe-b); }
 body.theater .grip { --grip: rgba(255,255,255,.16); }  /* over the picture */
 body.theater .grip:hover, body.theater .grip.dragging { --grip: rgba(255,255,255,.3); }
 .pad-hint { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
@@ -230,7 +228,7 @@ body.theater .grip:hover, body.theater .grip.dragging { --grip: rgba(255,255,255
 .it { font-style: italic; } .dim { opacity: .6; } .inv-h { visibility: hidden; }
 
 /* ---------------- controls ---------------- */
-.controls { position: absolute; inset: 0; overflow-y: auto; padding: 8px 12px 24px; -webkit-overflow-scrolling: touch; }
+.controls { position: absolute; inset: 0; overflow-y: auto; padding: 8px 12px 64px; -webkit-overflow-scrolling: touch; }
 .ctl-head { display: flex; align-items: flex-end; gap: 10px; padding: 8px 4px 12px; }
 .ctl-head h1 { margin: 0; font-size: 30px; line-height: 1.1; font-weight: 700; letter-spacing: -.5px; }
 .ctl-head .sub { color: var(--label2); font-size: 13px; margin-top: 3px; display: flex; flex-wrap: wrap; gap: 4px 10px; }
@@ -346,7 +344,7 @@ textarea.input { height: auto; min-height: 88px; padding: 10px 12px; resize: ver
 .action-list .list-row.red { color: var(--red); font-weight: 600; }
 
 /* ---------------- toast ---------------- */
-.toast { position: fixed; left: 50%; top: calc(var(--safe-t) + 10px); transform: translate(-50%, -140%); z-index: 60;
+.toast { position: fixed; left: 50%; top: calc(var(--safe-t) + 10px); transform: translate(-50%, calc(-100% - 24px - var(--safe-t))); z-index: 60;
   background: var(--bg3); color: var(--label); padding: 9px 16px; border-radius: 22px; font-size: 14px; font-weight: 500;
   box-shadow: var(--shadow); transition: transform .35s cubic-bezier(.2,.9,.3,1.15); max-width: 88vw;
   display: flex; align-items: center; gap: 8px; pointer-events: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -355,7 +353,7 @@ textarea.input { height: auto; min-height: 88px; padding: 10px 12px; resize: ver
 .toast span[data-icon] { font-size: 17px; }
 
 @media (min-width: 900px) {
-  .controls { padding: 16px max(16px, calc(50% - 360px)) 32px; }
+  .controls { padding: 16px max(16px, calc(50% - 360px)) 64px; }
   .remote { padding: 12px; gap: 10px; }
 }
 

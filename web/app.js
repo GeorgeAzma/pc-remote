@@ -298,11 +298,30 @@ export function showTab(name) {
   const prev = current;
   current = name;
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.dataset.view === name));
-  document.querySelectorAll('.tabbar button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.dock button[data-tab]').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
   if (prev && views[prev].hide) views[prev].hide();
   views[name].show && views[name].show();
   setSetting('tab', name);
+  placeDock();
 }
+
+// The dock floats just above the active view's bottom controls
+// (elements marked data-dock-above), or near the bottom edge without any.
+export function placeDock() {
+  const v = document.querySelector('.view.active');
+  let lift = 10;
+  if (v) {
+    const bottom = v.getBoundingClientRect().bottom;
+    for (const el of v.querySelectorAll('[data-dock-above]')) {
+      const r = el.getBoundingClientRect();
+      if (r.height && el.offsetParent) lift = Math.max(lift, bottom - r.top + 8);
+    }
+  }
+  document.documentElement.style.setProperty('--dock-b', Math.round(lift) + 'px');
+}
+const dockWatch = new ResizeObserver(() => placeDock());
+document.querySelectorAll('[data-dock-above], .view').forEach(el => dockWatch.observe(el));
+addEventListener('resize', placeDock);
 export const currentTab = () => current;
 
 // ------------------------------------------------------------ viewport ---
@@ -331,7 +350,7 @@ export let INFO = { shells: [], displays: [], video: {} };
 async function boot() {
   hydrateIcons();
   fitViewport();
-  document.querySelectorAll('.tabbar button[data-tab]').forEach(b => b.addEventListener('click', () => { haptic(5); showTab(b.dataset.tab); }));
+  document.querySelectorAll('.dock button[data-tab]').forEach(b => b.addEventListener('click', () => { haptic(5); showTab(b.dataset.tab); }));
   // The tab bar can fold away to a small handle, leaving the room to the view.
   const tabs = () => { document.body.classList.toggle('tabs-off', !!settings.hideTabs); fitViewport(); };
   document.getElementById('tabs-hide').addEventListener('click', () => { haptic(5); setSetting('hideTabs', true); tabs(); });
