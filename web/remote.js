@@ -2,7 +2,7 @@
 // local prediction, trackpad + direct-touch gestures, live keyboard.
 import { settings, setSetting, bus, h, ico, toast, haptic, sheet, url, wsUrl, INFO, Slider, toggle,
          copyToDevice } from './app.js';
-import { hydrateIcons, icon } from './icons.js';
+import { hydrateIcons } from './icons.js';
 
 const $ = id => document.getElementById(id);
 const stage = $('stage'), inner = $('stage-inner'), canvas = $('screen'), cursorEl = $('cursor');
@@ -379,7 +379,8 @@ function layout() {
   const typing = document.body.classList.contains('kb-open'), noPanel = !!settings.hidePanel && !typing;
   root.classList.toggle('no-panel', noPanel);
   // Before measuring: it changes the padding. Only while this tab is showing (resize callbacks fire after hide()).
-  document.body.classList.toggle('theater', noPanel && root.closest('.view').classList.contains('active'));
+  const theater = noPanel && root.closest('.view').classList.contains('active');
+  document.body.classList.toggle('theater', theater);
   const cs = getComputedStyle(root);
   const W = root.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
   const H = root.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
@@ -394,7 +395,7 @@ function layout() {
   const side = !typing && sideW > stackedW * 1.08 && H >= 200;  // where the panel goes when shown
   root.classList.toggle('side', side && !noPanel);
   root.style.setProperty('--panel-w', panel + 'px');
-  panelPill(side);
+  document.body.classList.toggle('theater-b', theater && !side);
   let w = noPanel ? Math.min(W, H * ar) : side ? sideW : stackedW, hh = w / ar;
   if (typing && hh < 60) { w = 0; hh = 0; }
   w = Math.max(0, Math.floor(w)); hh = Math.max(0, Math.floor(hh));
@@ -405,18 +406,58 @@ function layout() {
     stageBox = { w, h: hh };
     setView(view.s, view.tx, view.ty);
   }
+  placeGrip(root, side, noPanel, typing);
 }
 new ResizeObserver(() => layout()).observe(stage.parentElement);
-// Sidebar-style toggle for the trackpad / keys / input panel (a bigger picture
-// for watching videos; the picture itself still takes taps and keys).
-// The icon shows where the panel sits: filled while shown, empty while hidden.
-function panelPill(side) {
-  const p = $('panel-pill'), off = !!settings.hidePanel, name = (side ? 'sideR' : 'sideB') + (off ? 'off' : '');
-  if (p.dataset.ic === name) return;
-  p.dataset.ic = name;
-  p.innerHTML = icon(name);
-  p.setAttribute('aria-label', p.title = off ? 'Show trackpad and keys' : 'Hide trackpad and keys');
+// The panel's grab bar: in the gap between the picture and the panel, or at
+// the screen edge while the panel is hidden; its chevron points where it goes.
+function placeGrip(root, side, off, typing) {
+  const g = $('panel-grip');
+  g.classList.toggle('hidden', typing);
+  if (typing) return;
+  const rr = root.getBoundingClientRect(), cs = getComputedStyle(root);
+  let x, y, dir;
+  if (off) {
+    dir = side ? 'left' : 'up';
+    x = side ? rr.width - 9 : rr.width / 2;
+    y = side ? rr.height / 2 : rr.height - 9;
+  } else if (side) {
+    dir = 'right';
+    x = pad.getBoundingClientRect().left - rr.left - (parseFloat(cs.columnGap) || 8) / 2;
+    y = rr.height / 2;
+  } else {
+    dir = 'down';
+    x = rr.width / 2;
+    y = stage.getBoundingClientRect().bottom - rr.top + (parseFloat(cs.rowGap) || 8) / 2;
+  }
+  g.className = `grip ${side ? 'v' : 'h'} ${dir}`;
+  g.style.left = x + 'px';
+  g.style.top = y + 'px';
+  g.setAttribute('aria-label', g.title = off ? 'Show trackpad and keys' : 'Hide trackpad and keys');
 }
+// Hiding the panel also goes browser-fullscreen (where allowed, e.g. not on
+// iPhone); leaving fullscreen (Esc) brings the panel back.
+let fsByUs = false;
+const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
+$('panel-grip').addEventListener('click', () => {
+  haptic(5);
+  const hide = !settings.hidePanel, de = document.documentElement;
+  const req = de.requestFullscreen || de.webkitRequestFullscreen;
+  if (hide && !fsEl() && req) {
+    fsByUs = true;
+    try { Promise.resolve(req.call(de, { navigationUI: 'hide' })).catch(() => { fsByUs = false; }); } catch { fsByUs = false; }
+  } else if (!hide && fsByUs && fsEl()) {
+    fsByUs = false;
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document)?.catch?.(() => {});
+  }
+  setSetting('hidePanel', hide);
+});
+for (const ev of ['fullscreenchange', 'webkitfullscreenchange'])
+  document.addEventListener(ev, () => {
+    if (fsEl() || !fsByUs) return;
+    fsByUs = false;
+    if (settings.hidePanel) setSetting('hidePanel', false);
+  });
 bus.addEventListener('layout', () => active && layout());
 
 // ====================================================== stream methods ===
@@ -1091,7 +1132,6 @@ gestures(stage, { direct: true });
 const hideHint = () => $('pad-hint').classList.add('gone');
 pad.addEventListener('pointerdown', hideHint, { once: true });
 pad.addEventListener('wheel', hideHint, { once: true, passive: true });
-$('panel-pill').addEventListener('click', () => { haptic(5); setSetting('hidePanel', !settings.hidePanel); });
 renderStrip();
 updateDisplayPill();
 bus.addEventListener('settings', e => {
@@ -1114,7 +1154,7 @@ export function show() {
 }
 export function hide() {
   active = false;
-  document.body.classList.remove('theater');
+  document.body.classList.remove('theater', 'theater-b');
   video.stop();
 }
 hydrateIcons(document.getElementById('view-remote'));

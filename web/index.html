@@ -33,7 +33,6 @@
           <button class="pill hidden" id="hd-pill" title="Switch to the HD stream (HTTPS)">HD</button>
           <button class="pill hidden" id="zoom-pill" aria-label="Reset zoom">1×</button>
           <button class="pill hidden" id="display-pill" aria-label="Switch display"></button>
-          <button class="pill ic" id="panel-pill" aria-label="Hide trackpad and keys"></button>
         </div>
         <pre class="hud hidden" id="hud"></pre>
         <div class="stage-msg hidden" id="stage-msg"></div>
@@ -49,6 +48,7 @@
         <button class="clip-btn" id="clip-copy">Copy</button>
         <button class="clip-x" id="clip-x" aria-label="Dismiss" data-icon="x"></button>
       </div>
+      <button class="grip" id="panel-grip" aria-label="Hide trackpad and keys"><i></i><i></i></button>
       <div class="keystrip" id="keystrip" role="toolbar" aria-label="Keys"></div>
       <div class="inputbar">
         <label class="field">
@@ -94,7 +94,7 @@
   <button data-tab="controls"><span data-icon="controls"></span><b>Controls</b></button>
   <button class="tabs-hide" id="tabs-hide" aria-label="Hide tab bar" title="Hide tab bar" data-icon="chevdown"></button>
 </nav>
-<button class="tabs-handle" id="tabs-show" aria-label="Show tab bar" title="Show tab bar"></button>
+<button class="grip h up tabs-handle" id="tabs-show" aria-label="Show tab bar" title="Show tab bar"><i></i><i></i></button>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div class="sheets" id="sheets"></div>

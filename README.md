@@ -70,9 +70,10 @@ Scripts and curl are unaffected.
 | tap on the screen image | click exactly there (or use it as a trackpad, see Settings) |
 | pinch on the screen image | zoom in (the stream switches to higher resolution) |
 
-For watching videos, the sidebar button in the top-right corner of the picture
-hides the whole panel (trackpad, keys and text field), and the ⌄ at the end of
-the tab bar folds it down to a small handle (tap the handle to bring it back).
+For watching videos, tap the grab bar between the picture and the panel: the
+panel (trackpad, keys and text field) slides away and the browser goes full
+screen. The bar then waits at the screen edge; tap it, or press Esc, to bring
+the panel back. The ⌄ at the end of the tab bar folds it down to a similar bar.
 The picture still takes taps and your physical keyboard (or works as the
 trackpad, see *Touching the screen* in Settings).
 
