@@ -2,7 +2,7 @@
 // local prediction, trackpad + direct-touch gestures, live keyboard.
 import { settings, setSetting, bus, h, ico, toast, haptic, sheet, url, wsUrl, INFO, Slider, toggle,
          copyToDevice } from './app.js';
-import { hydrateIcons } from './icons.js';
+import { hydrateIcons, icon } from './icons.js';
 
 const $ = id => document.getElementById(id);
 const stage = $('stage'), inner = $('stage-inner'), canvas = $('screen'), cursorEl = $('cursor');
@@ -379,14 +379,16 @@ function layout() {
   const cs = getComputedStyle(root);
   const W = root.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
   const H = root.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
-  const typing = document.body.classList.contains('kb-open');
+  const typing = document.body.classList.contains('kb-open'), noPad = !!settings.hidePad;
+  root.classList.toggle('no-pad', noPad);
   // Stacked (screen above the pad) vs side-by-side (controls on the right):
   // use whichever gives the bigger picture.
   const others = [strip, kb.closest('.inputbar'), $('clip-pill')].filter(x => !x.classList.contains('hidden'))
     .reduce((a, x) => a + (x.offsetHeight || 36) + gap, 0);
-  const minPad = typing ? 0 : Math.max(120, Math.min(220, H * 0.24));
+  const minPad = typing || noPad ? 0 : Math.max(120, Math.min(220, H * 0.24));
   const stackedW = Math.max(0, Math.min(W, (H - others - minPad - gap) * ar));
-  const panel = clamp(W * 0.3, 260, 380);
+  // Without the pad the side panel only holds keys + input: give the picture its width.
+  const panel = noPad ? clamp(W - gap - H * ar, 240, clamp(W * 0.3, 260, 380)) : clamp(W * 0.3, 260, 380);
   const sideW = Math.max(0, Math.min(W - panel - gap, H * ar));
   const side = !typing && sideW > stackedW * 1.08 && H >= 200;
   root.classList.toggle('side', side);
@@ -1077,11 +1079,22 @@ gestures(stage, { direct: true });
 const hideHint = () => $('pad-hint').classList.add('gone');
 pad.addEventListener('pointerdown', hideHint, { once: true });
 pad.addEventListener('wheel', hideHint, { once: true, passive: true });
+// Hide the trackpad for a bigger picture (watching videos); the picture itself still takes taps.
+const padBtn = $('btn-pad');
+function applyPad() {
+  const off = !!settings.hidePad;
+  padBtn.innerHTML = icon(off ? 'collapse' : 'expand');
+  padBtn.setAttribute('aria-label', padBtn.title = off ? 'Show trackpad' : 'Hide trackpad');
+  if (active) layout();
+}
+padBtn.addEventListener('click', () => { haptic(5); setSetting('hidePad', !settings.hidePad); });
+applyPad();
 renderStrip();
 updateDisplayPill();
 bus.addEventListener('settings', e => {
   const k = e.detail.key;
   if (k === 'stats') $('hud').classList.toggle('hidden', !settings.stats);
+  if (k === 'hidePad') applyPad();
   if (!active || !video.ws) return;
   if (k === 'stream' && JSON.stringify(resolvePlan()) !== JSON.stringify(video.plan)) { video.stop(); video.start(); }
   else if (k === 'quality') video.wantConfig();  // debounced, seamless switch

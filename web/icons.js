@@ -44,6 +44,8 @@ const P = {
   screen: '<rect x="2.5" y="4" width="19" height="12.5" rx="2.5"/><path d="M8.5 20.5h7M12 16.5v4"/>',
   hand: '<path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V11m0-1.5V4a1.5 1.5 0 0 1 3 0v6.5m0-4a1.5 1.5 0 0 1 3 0v6m0-3.5a1.5 1.5 0 0 1 3 0V15a7 7 0 0 1-7 7h-1a7 7 0 0 1-5.6-2.8L3.2 16a1.6 1.6 0 0 1 2.5-2L8 16"/>',
   bolt: '<path d="M13 2.5 4.5 13.5h6.5l-1 8 8.5-11h-6.5Z"/>',
+  expand: '<path d="M14.5 4H20v5.5M20 4l-6 6M9.5 20H4v-5.5M4 20l6-6"/>',
+  collapse: '<path d="M19.5 10H14V4.5M14 10l6-6M4.5 14H10v5.5M10 14l-6 6"/>',
 };
 const cache = new Map();
 export function icon(name) {

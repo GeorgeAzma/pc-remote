@@ -70,6 +70,10 @@ Scripts and curl are unaffected.
 | tap on the screen image | click exactly there (or use it as a trackpad, see Settings) |
 | pinch on the screen image | zoom in (the stream switches to higher resolution) |
 
+The ⤢ button next to the text field hides the trackpad for a bigger picture,
+handy for watching videos. The picture still takes taps (or works as the
+trackpad, see *Touching the screen* in Settings).
+
 Pointer speed, acceleration, scroll speed and direction are in ⚙ Settings.
 Pointer motion uses a velocity curve: slow strokes are precise, and a quick
 flick crosses the whole screen.

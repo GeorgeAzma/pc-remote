@@ -51,7 +51,7 @@ function askToken() {
 // ------------------------------------------------------------ settings ---
 const DEFAULTS = {
   speed: 1, accel: 0.6, scroll: 1, natural: true, touch: 'direct', stream: 'auto', quality: 0.5,
-  stats: false, haptics: true, termFont: 13, tab: 'remote', recents: [], shell: 'ps',
+  stats: false, haptics: true, termFont: 13, tab: 'remote', recents: [], shell: 'ps', hidePad: false,
 };
 export const settings = { ...DEFAULTS, ...(JSON.parse(store('settings') || '{}')) };
 delete settings.fps;    // superseded by the Speed <-> Quality slider (+ display refresh)
