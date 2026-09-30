@@ -35,8 +35,14 @@ export async function api(path, body) {
 export async function run(cmd, args = {}) {
   return (await api('/' + cmd, args)).result;
 }
-/** The key a signed-in device holds (it changes when all devices are signed out). */
-export function setToken(k) { TOKEN = k; store('token', k); }
+/** The key a signed-in device holds (it changes when other devices are signed
+ *  out). Kept twice: in this page's storage, and as a cookie the server sets
+ *  (fetching the page with the key), so either one alone keeps it signed in. */
+export function setToken(k) {
+  TOKEN = k;
+  store('token', k);
+  return fetch(new URL('/?token=' + encodeURIComponent(k), location.origin)).catch(() => {});
+}
 let asking = false, signInPill = null, canScan = false;
 export async function signIn() {
   if (asking) return;
@@ -53,7 +59,7 @@ export async function signIn() {
         body: JSON.stringify({ password: inp.value }) });
       d = await r.json().catch(() => ({}));
     } catch { toast('PC unreachable', { err: true, always: true }); return; }
-    if (r.ok && d.key) { setToken(d.key); location.reload(); return; }
+    if (r.ok && d.key) { await setToken(d.key); location.reload(); return; }
     toast(d.error || 'Sign-in failed', { err: true, always: true });
     inp.select();
   };
@@ -90,7 +96,7 @@ async function scanSheet() {
     if (!key) { toast(/^https?:/.test(text) ? 'This QR code has no sign-in key' : 'Not a PC Remote QR code', { err: true, always: true }); return false; }
     const r = await fetch(new URL('/api/auth', location.origin), { headers: { 'X-Token': key } }).then(r => r.json()).catch(() => null);
     if (!r || r.required) { toast('This QR code is old or from another PC', { err: true, always: true }); return false; }
-    setToken(key);
+    await setToken(key);
     haptic(10);
     location.reload();
     return true;
