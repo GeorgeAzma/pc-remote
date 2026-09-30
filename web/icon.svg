@@ -1,12 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
   <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#3a8dff"/>
-      <stop offset="1" stop-color="#5e5ce6"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#26262b"/>
+      <stop offset="1" stop-color="#111114"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6aa8ff"/>
+      <stop offset="1" stop-color="#3f6fff"/>
     </linearGradient>
   </defs>
-  <rect width="512" height="512" rx="112" fill="url(#g)"/>
-  <rect x="104" y="128" width="304" height="200" rx="28" fill="none" stroke="#fff" stroke-width="28"/>
-  <path d="M256 328v56M184 384h144" stroke="#fff" stroke-width="28" stroke-linecap="round"/>
-  <path d="M236 196l72 42-34 8-14 32z" fill="#fff" stroke="#fff" stroke-width="10" stroke-linejoin="round"/>
+  <rect width="512" height="512" rx="116" fill="url(#bg)"/>
+  <rect x="92" y="118" width="328" height="214" rx="30" fill="url(#screen)"/>
+  <path d="M122 148h128l-78 152h-50z" fill="#fff" opacity=".12"/>
+  <rect x="234" y="330" width="44" height="46" fill="#d9d9e0"/>
+  <rect x="172" y="370" width="168" height="30" rx="15" fill="#d9d9e0"/>
 </svg>
