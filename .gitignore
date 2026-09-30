@@ -2,3 +2,7 @@
 
 .venv/
 __pycache__/
+
+# generated at runtime
+.certs/
+server.log

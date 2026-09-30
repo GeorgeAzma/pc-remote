@@ -1,0 +1,17 @@
+# The server runs on the standard library; these add features.
+# Also install ffmpeg for screen streaming:  winget install Gyan.FFmpeg
+
+# HTTPS (phones need it for the low-latency H.264 stream)
+cryptography>=42
+
+# Master volume / mute (Windows.Media) and Wi-Fi / Bluetooth radios
+winrt-runtime==3.2.1
+winrt-Windows.Foundation==3.2.1
+winrt-Windows.Foundation.Collections==3.2.1
+winrt-Windows.Devices.Enumeration==3.2.1
+winrt-Windows.Devices.Radios==3.2.1
+winrt-Windows.Media.Audio==3.2.1
+winrt-Windows.Media.Capture==3.2.1
+winrt-Windows.Media.Devices==3.2.1
+winrt-Windows.Media.MediaProperties==3.2.1
+winrt-Windows.Media.Render==3.2.1

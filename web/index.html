@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PC Remote">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/icon.svg">
+<link rel="stylesheet" href="/static/style.css">
+<title>PC Remote</title>
+</head>
+<body>
+<div id="app">
+  <!-- ============ Remote ============ -->
+  <section class="view" id="view-remote" data-view="remote">
+    <div class="remote">
+      <div class="stage" id="stage" tabindex="0" aria-label="PC screen">
+        <div class="stage-inner" id="stage-inner">
+          <canvas id="screen"></canvas>
+          <video id="screen-video" muted playsinline disablepictureinpicture hidden></video>
+        </div>
+        <img class="cursor" id="cursor" alt="">
+        <div class="stage-top">
+          <button class="pill" id="status-pill" aria-label="Stream status"><i class="dot"></i><span>Connecting</span></button>
+          <span class="spacer"></span>
+          <button class="pill hidden" id="hd-pill" title="Switch to the HD stream (HTTPS)">HD</button>
+          <button class="pill hidden" id="zoom-pill" aria-label="Reset zoom">1×</button>
+          <button class="pill hidden" id="display-pill" aria-label="Switch display"></button>
+        </div>
+        <pre class="hud hidden" id="hud"></pre>
+        <div class="stage-msg hidden" id="stage-msg"></div>
+      </div>
+      <div class="pad" id="pad" tabindex="0" aria-label="Trackpad">
+        <div class="pad-hint" id="pad-hint">
+          <span>Tap to click</span><span>Two fingers scroll · right-click</span><span>Hold to drag</span>
+        </div>
+      </div>
+      <div class="clip-pill hidden" id="clip-pill">
+        <span class="clip-ico" data-icon="clipboard"></span>
+        <span class="clip-text" id="clip-text"></span>
+        <button class="clip-btn" id="clip-copy">Copy</button>
+        <button class="clip-x" id="clip-x" aria-label="Dismiss" data-icon="x"></button>
+      </div>
+      <div class="keystrip" id="keystrip" role="toolbar" aria-label="Keys"></div>
+      <div class="inputbar">
+        <label class="field">
+          <span class="field-ico" data-icon="keyboard"></span>
+          <input id="kb" type="text" placeholder="Type on PC" autocomplete="off" autocorrect="off"
+                 autocapitalize="off" spellcheck="false" enterkeyhint="send" aria-label="Type on PC">
+        </label>
+        <button class="icon-btn" id="btn-shortcut" aria-label="Shortcuts" data-icon="command"></button>
+        <button class="icon-btn" id="btn-settings" aria-label="Settings" data-icon="gear"></button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Terminal ============ -->
+  <section class="view" id="view-term" data-view="term">
+    <div class="term">
+      <div class="term-bar">
+        <div class="seg" id="term-shells" role="tablist"></div>
+        <span class="spacer"></span>
+        <i class="dot" id="term-dot"></i>
+        <button class="icon-btn sm" id="term-font-dn" aria-label="Smaller text" data-icon="textsm"></button>
+        <button class="icon-btn sm" id="term-font-up" aria-label="Larger text" data-icon="textlg"></button>
+        <button class="icon-btn sm" id="term-menu" aria-label="Terminal menu" data-icon="more"></button>
+      </div>
+      <div class="term-screen" id="term-screen" tabindex="0">
+        <div class="term-rows" id="term-rows"></div>
+        <textarea id="term-input" class="term-input" autocomplete="off" autocorrect="off"
+                  autocapitalize="off" spellcheck="false" aria-label="Terminal input"></textarea>
+      </div>
+      <div class="accbar" id="term-acc" role="toolbar" aria-label="Terminal keys"></div>
+    </div>
+  </section>
+
+  <!-- ============ Controls ============ -->
+  <section class="view" id="view-controls" data-view="controls">
+    <div class="controls" id="controls"></div>
+  </section>
+</div>
+
+<nav class="tabbar" id="tabbar">
+  <button data-tab="remote"><span data-icon="trackpad"></span><b>Remote</b></button>
+  <button data-tab="term"><span data-icon="terminal"></span><b>Terminal</b></button>
+  <button data-tab="controls"><span data-icon="controls"></span><b>Controls</b></button>
+</nav>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="sheets" id="sheets"></div>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
