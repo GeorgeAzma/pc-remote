@@ -410,7 +410,7 @@ function layout() {
 }
 new ResizeObserver(() => layout()).observe(stage.parentElement);
 // The panel's grab bar: in the gap between the picture and the panel, or at
-// the screen edge while the panel is hidden; its chevron points where it goes.
+// the screen edge while the panel is hidden.
 function placeGrip(root, side, off, typing) {
   const g = $('panel-grip');
   g.classList.toggle('hidden', typing);

@@ -73,24 +73,16 @@ body.kb-open .tabbar { display: none; }
 .tabbar button b { font-size: 10.5px; font-weight: 500; letter-spacing: .1px; }
 .tabbar button.active { color: var(--tint); }
 .tabbar .tabs-hide { flex: none; width: 44px; font-size: 18px; color: var(--label3); }
-/* Grab bars that fold panels away: two halves of a bar, bent into a chevron
-   pointing where the tap will move things (a hint at rest, clearer on hover). */
-.grip { position: absolute; z-index: 6; --a: 14deg; opacity: .32; transition: opacity .15s; }
+/* Grab bars (a plain ribbon, like a sheet's grabber) that fold a panel away / bring it back */
+.grip { position: absolute; z-index: 6; opacity: .3; transition: opacity .15s; }
+.grip::after { content: ""; position: absolute; border-radius: 2px; background: var(--label); transition: transform .15s; }
 .grip.v { width: 22px; height: 80px; margin: -40px 0 0 -11px; }
+.grip.v::after { left: 9px; top: 20px; width: 4px; height: 40px; }
 .grip.h { width: 80px; height: 22px; margin: -11px 0 0 -40px; }
-.grip i { position: absolute; border-radius: 2px; background: var(--label);
-  transition: transform .22s cubic-bezier(.3,.7,.4,1.2); }
-.grip.v i { left: 9px; width: 4px; height: 21px; }
-.grip.v i:first-child { top: 19px; transform-origin: 50% calc(100% - 2px); }
-.grip.v i:last-child { top: 38px; transform-origin: 50% 2px; }
-.grip.h i { top: 9px; height: 4px; width: 21px; }
-.grip.h i:first-child { left: 19px; transform-origin: calc(100% - 2px) 50%; }
-.grip.h i:last-child { left: 38px; transform-origin: 2px 50%; }
-.grip.right i:first-child, .grip.left i:last-child, .grip.up i:first-child, .grip.down i:last-child { transform: rotate(calc(-1 * var(--a))); }
-.grip.right i:last-child, .grip.left i:first-child, .grip.up i:last-child, .grip.down i:first-child { transform: rotate(var(--a)); }
-.grip:hover, .grip:focus-visible { --a: 28deg; }
-.grip:hover, .grip:active { opacity: .6; }
-.grip:active { --a: 34deg; }
+.grip.h::after { top: 9px; left: 20px; height: 4px; width: 40px; }
+.grip:hover, .grip:focus-visible { opacity: .6; }
+.grip.v:hover::after { transform: scaleY(1.15); } .grip.h:hover::after { transform: scaleX(1.15); }
+.grip:active { opacity: .8; }
 .tabs-handle { display: none; position: fixed; left: 50%; top: auto; bottom: var(--safe-b); margin: 0 0 0 -40px; z-index: 20; }
 body.tabs-off .tabs-handle { display: block; }
 body.kb-open .tabs-handle { display: none; }
@@ -161,7 +153,7 @@ body.theater { background: #000; }
 body.theater .remote { padding: 0; }
 body.theater.tabs-off #app { padding-bottom: var(--safe-b); }
 body.theater.tabs-off .view { bottom: var(--safe-b); }
-body.theater .grip i { background: #fff; }  /* over the picture */
+body.theater .grip::after { background: #fff; }  /* over the picture */
 .pad-hint { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
   justify-content: center; gap: 4px; color: var(--label3); font-size: 12px; pointer-events: none; transition: opacity .6s; }
 .pad-hint.gone { opacity: 0; }
