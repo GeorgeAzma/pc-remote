@@ -305,7 +305,7 @@ function pairSheet(st) {
   draw();
   sheet({ title: 'Add a device', body: h('div', { class: 'form' },
     h('div', { class: 'note' }, st.enabled
-      ? 'Scan this with the phone\u2019s camera: it opens PC Remote already signed in. Or open the address below and enter the code. For devices away from home, pick Tailscale.'
+      ? 'Scan this with the phone\u2019s camera, or with Scan the QR code on the app\u2019s sign-in screen: it signs in. Or open the address below and enter the code. For devices away from home, pick Tailscale.'
       : 'Scan this with the phone\u2019s camera to open PC Remote (sign-in is off).'),
     h('div', { style: 'overflow-x:auto;display:flex;justify-content:center' }, seg), qr, link,
     h('button', { class: 'btn gray', onclick: async () => toast((await copyToDevice(signedLink()))

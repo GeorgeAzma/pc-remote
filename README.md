@@ -22,7 +22,7 @@ Away from home? Put the PC and the phone on [Tailscale](https://tailscale.com) a
 
 ## Sign-in
 
-Sign-in is **on** by default. A new device enters the access code once, or scans the QR code. The PC itself never has to (WSL, containers and tunnels on it do). Manage it in **Controls → About → Sign-in & devices**, where you can:
+Sign-in is **on** by default. A new device scans the PC's QR code (with its camera, or **Scan the QR code** in the app) or enters the access code, once. The PC itself never has to (WSL, containers and tunnels on it do). Manage it in **Controls → About → Sign-in & devices**, where you can:
 
 - add a device with a QR code;
 - use your own password instead of the code;

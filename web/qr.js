@@ -1,18 +1,19 @@
 // A small QR code encoder (byte mode, error correction level M, versions
 // 1-10: up to 213 bytes, plenty for a pairing link). Self-contained so the
-// app works on an offline network. Follows ISO/IEC 18004.
+// app works on an offline network. Follows ISO/IEC 18004. The tables and
+// the module layout are shared with the scanner (qrscan.js).
 
 // Error correction per version (level M): [EC codewords per block, [blocks, data codewords]...]
-const EC_M = [null,
+export const EC_M = [null,
   [10, [1, 16]], [16, [1, 28]], [26, [1, 44]], [18, [2, 32]], [24, [2, 43]],
   [16, [4, 27]], [18, [4, 31]], [22, [2, 38], [2, 39]], [22, [3, 36], [2, 37]], [26, [4, 43], [1, 44]]];
 const ALIGN = [null, [], [6, 18], [6, 22], [6, 26], [6, 30], [6, 34], [6, 22, 38], [6, 24, 42], [6, 26, 46], [6, 28, 50]];
 
 // ---- Reed-Solomon over GF(256), polynomial 0x11D
-const EXP = new Uint8Array(512), LOG = new Uint8Array(256);
+export const EXP = new Uint8Array(512), LOG = new Uint8Array(256);
 for (let i = 0, x = 1; i < 255; i++) { EXP[i] = x; LOG[x] = i; x <<= 1; if (x & 256) x ^= 0x11D; }
 for (let i = 255; i < 512; i++) EXP[i] = EXP[i - 255];
-const mul = (a, b) => (a && b ? EXP[LOG[a] + LOG[b]] : 0);
+export const mul = (a, b) => (a && b ? EXP[LOG[a] + LOG[b]] : 0);
 function rsGenerator(n) {
   let g = [1];
   for (let i = 0; i < n; i++) {  // g *= (x - a^i)
@@ -62,6 +63,41 @@ function codewords(bytes) {
 }
 
 // ---- the matrix
+export const MASKS = [(x, y) => (x + y) % 2 === 0, (x, y) => y % 2 === 0, x => x % 3 === 0, (x, y) => (x + y) % 3 === 0,
+  (x, y) => (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0, (x, y) => (x * y) % 2 + (x * y) % 3 === 0,
+  (x, y) => ((x * y) % 2 + (x * y) % 3) % 2 === 0, (x, y) => ((x + y) % 2 + (x * y) % 3) % 2 === 0];
+
+/** Format information: level M (00) + mask, BCH(15,5), XOR 0x5412. Bit i of the result is format bit i. */
+export function formatBits(mask, level = 0) {
+  const data = (level << 3) | mask;
+  let rem = data;
+  for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+  return ((data << 10) | rem) ^ 0x5412;
+}
+
+/** Where format bit i sits, both copies: [[x, y], [x, y]]. */
+export function formatSpots(size, i) {
+  const a = i <= 5 ? [8, i] : i === 6 ? [8, 7] : i === 7 ? [8, 8] : i === 8 ? [7, 8] : [14 - i, 8];
+  const b = i < 8 ? [size - 1 - i, 8] : [8, size - 15 + i];
+  return [a, b];
+}
+
+/** The data modules in reading order: the two-column zigzag from the bottom right. */
+export function dataOrder(size, fn) {
+  const out = [];
+  for (let right = size - 1; right >= 1; right -= 2) {
+    if (right === 6) right = 5;
+    for (let vert = 0; vert < size; vert++) for (let j = 0; j < 2; j++) {
+      const x = right - j, up = ((right + 1) & 2) === 0, y = up ? size - 1 - vert : vert;
+      if (!fn[y][x]) out.push([x, y]);
+    }
+  }
+  return out;
+}
+
+/** Which modules are function patterns (not data), for a version. */
+export function functionModules(version) { return build(version, [], 0).fn; }
+
 function build(version, words, mask) {
   const size = version * 4 + 17;
   const m = Array.from({ length: size }, () => new Array(size).fill(false));
@@ -78,19 +114,9 @@ function build(version, words, mask) {
     if ((i === 0 && j === 0) || (i === 0 && j === last) || (i === last && j === 0)) return;
     for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) set(cx + dx, cy + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
   }));
-  const format = () => {  // level M (00) + mask, BCH(15,5), XOR 0x5412
-    const data = mask;
-    let rem = data;
-    for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
-    const bits = ((data << 10) | rem) ^ 0x5412, bit = i => ((bits >>> i) & 1) === 1;
-    for (let i = 0; i <= 5; i++) set(8, i, bit(i));
-    set(8, 7, bit(6)); set(8, 8, bit(7)); set(7, 8, bit(8));
-    for (let i = 9; i < 15; i++) set(14 - i, 8, bit(i));
-    for (let i = 0; i < 8; i++) set(size - 1 - i, 8, bit(i));
-    for (let i = 8; i < 15; i++) set(8, size - 15 + i, bit(i));
-    set(8, size - 8, true);  // the dark module
-  };
-  format();
+  const bits = formatBits(mask);
+  for (let i = 0; i < 15; i++) for (const [x, y] of formatSpots(size, i)) set(x, y, ((bits >>> i) & 1) === 1);
+  set(8, size - 8, true);  // the dark module
   if (version >= 7) {  // version information, BCH(18,6)
     let rem = version;
     for (let i = 0; i < 12; i++) rem = (rem << 1) ^ ((rem >>> 11) * 0x1F25);
@@ -100,20 +126,11 @@ function build(version, words, mask) {
       set(a, c, b); set(c, a, b);
     }
   }
-  // data, in the two-column zigzag from the bottom right
-  let i = 0;
-  for (let right = size - 1; right >= 1; right -= 2) {
-    if (right === 6) right = 5;
-    for (let vert = 0; vert < size; vert++) for (let j = 0; j < 2; j++) {
-      const x = right - j, up = ((right + 1) & 2) === 0, y = up ? size - 1 - vert : vert;
-      if (!fn[y][x] && i < words.length * 8) { m[y][x] = ((words[i >>> 3] >>> (7 - (i & 7))) & 1) === 1; i++; }
-    }
-  }
-  const flip = [(x, y) => (x + y) % 2 === 0, (x, y) => y % 2 === 0, x => x % 3 === 0, (x, y) => (x + y) % 3 === 0,
-    (x, y) => (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0, (x, y) => (x * y) % 2 + (x * y) % 3 === 0,
-    (x, y) => ((x * y) % 2 + (x * y) % 3) % 2 === 0, (x, y) => ((x + y) % 2 + (x * y) % 3) % 2 === 0][mask];
+  // data, then the mask over everything that isn't a function pattern
+  dataOrder(size, fn).slice(0, words.length * 8).forEach(([x, y], i) => { m[y][x] = ((words[i >>> 3] >>> (7 - (i & 7))) & 1) === 1; });
+  const flip = MASKS[mask];
   for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) if (!fn[y][x] && flip(x, y)) m[y][x] = !m[y][x];
-  return m;
+  return { m, fn };
 }
 
 // Mask choice: the standard penalty rules (long runs, 2x2 blocks,
@@ -146,10 +163,10 @@ function penalty(m) {
 /** text -> matrix of booleans (true = dark), best mask. */
 export function qrMatrix(text, forceMask) {
   const { version, words } = codewords([...new TextEncoder().encode(text)]);
-  if (forceMask !== undefined) return build(version, words, forceMask);
+  if (forceMask !== undefined) return build(version, words, forceMask).m;
   let best = null;
   for (let mask = 0; mask < 8; mask++) {
-    const m = build(version, words, mask), s = penalty(m);
+    const { m } = build(version, words, mask), s = penalty(m);
     if (!best || s < best.s) best = { m, s };
   }
   return best.m;
