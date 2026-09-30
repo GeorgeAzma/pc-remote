@@ -54,14 +54,14 @@ Filename: "{app}\PC Remote.exe"; Parameters: "--setup --no-startup"; Tasks: not 
 ; silent installs: start it right away
 Filename: "{sys}\schtasks.exe"; Parameters: "/Run /TN ""PC Remote"""; Tasks: startup; Flags: runhidden; Check: WizardSilent
 ; the last page: open it (as you, not as the admin that installed it)
-Filename: "{app}\PC Remote.exe"; Description: "Start PC Remote and show its addresses"; Flags: postinstall nowait skipifsilent runasoriginaluser
+Filename: "{app}\PC Remote.exe"; Description: "Start PC Remote and show the QR code for your phone"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM ""PC Remote.exe"""; Flags: runhidden; RunOnceId: "Stop"
 Filename: "{app}\PC Remote.exe"; Parameters: "--unsetup"; Flags: runhidden waituntilterminated; RunOnceId: "Unsetup"
 
 [UninstallDelete]
-; its certificates and log
+; its sign-in settings, certificates and log
 Type: filesandordirs; Name: "{localappdata}\PC Remote"
 
 [Code]

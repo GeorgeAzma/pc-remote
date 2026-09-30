@@ -89,22 +89,21 @@ def _check(password: str) -> bool:  # under _lock
 
 
 def login(ip: str, password: str):
-    """-> (key, None) when right, (None, seconds to wait) when not. Five
-    wrong tries lock that address out for 30 s, doubling after that."""
-    now = time.monotonic()
-    fails, until = _fails.get(ip, (0, 0.0))
-    if now < until:
-        return None, int(until - now) + 1
+    """-> (key, None) when right, (None, seconds to wait or None) when not.
+    Five wrong tries lock that address out for 30 s, doubling each time up
+    to 15 minutes. (Under the lock, so parallel guesses count too.)"""
     with _lock:
-        ok = _check(password or "")
-        k = _load()["key"]
-    if ok:
-        _fails.pop(ip, None)
-        return k, None
-    fails += 1
-    wait = 30 * 2 ** (fails - 5) if fails >= 5 else 0
-    _fails[ip] = (fails, now + min(wait, 900))
-    return None, wait or None
+        now = time.monotonic()
+        fails, until = _fails.get(ip, (0, 0.0))
+        if now < until:
+            return None, int(until - now) + 1
+        if _check(password):
+            _fails.pop(ip, None)
+            return _cfg["key"], None
+        fails += 1
+        wait = min(30 * 2 ** (fails - 5), 900) if fails >= 5 else 0
+        _fails[ip] = (fails, now + wait)
+        return None, wait or None
 
 
 def status(include_secrets: bool) -> dict:
@@ -125,7 +124,7 @@ def update(enabled=None, password=None, new_code=False, new_key=False) -> dict:
         if enabled is not None:
             cfg["enabled"] = bool(enabled)
         if password is not None:
-            if len(password) < 6:
+            if not isinstance(password, str) or len(password) < 6:
                 raise ValueError("use at least 6 characters")
             salt = secrets.token_bytes(16)
             cfg.update(salt=salt.hex(), hash=_hash(password, salt).hex())

@@ -208,6 +208,8 @@ const copyBtn = (text, label = 'Copy') => h('button', { class: 'kv-copy', title:
 const netName = ip => /^192\.168\.|^10\./.test(ip) ? 'Local network'
   : /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip) ? 'Tailscale'
   : 'Other';  // VPNs, WSL / Hyper-V adapters, …
+const NETS = ['Local network', 'Tailscale', 'Other'];
+const byNet = ips => [...ips].sort((a, b) => NETS.indexOf(netName(a)) - NETS.indexOf(netName(b)));
 const when = t => new Date(t * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 
 async function aboutSheet() {
@@ -215,8 +217,7 @@ async function aboutSheet() {
   try { about = await run('about'); } catch (e) { s.setBody(h('div', { class: 'empty' }, e.message)); return; }
   const a = about, port = location.port || (location.protocol === 'https:' ? 443 : 80);
   const plan = resolvePlan(), method = METHODS.find(m => m.id === plan.mode)?.name;
-  const ips = [...a.ips].sort((x, y) => (netName(x) === 'Local network' ? 0 : netName(x) === 'Tailscale' ? 1 : 2)
-                                     - (netName(y) === 'Local network' ? 0 : netName(y) === 'Tailscale' ? 1 : 2));
+  const ips = byNet(a.ips);
   s.setBody(h('div', {},
     h('div', { class: 'group-title' }, 'PC'),
     h('div', { class: 'card' },
@@ -237,11 +238,10 @@ async function aboutSheet() {
     h('div', { class: 'card' },
       kv('Version', a.version && (a.version + (a.version_time ? ` · ${when(a.version_time)}` : ''))),
       kv('Running for', fmtDuration(a.server_up_s)),
-      kv('Sign-in', a.token ? 'Required' : 'Off — anyone who can reach this PC can use it'),
+      kv('Sign-in', a.sign_in ? 'Required' : 'Off — anyone who can reach this PC can use it'),
       kv('Video encoder', [...(a.encoders.h264 || []), ...(a.encoders.hevc || [])].join(', ') || 'None found'),
       kv('JPEG', a.tiles ? 'Changed areas only' : 'Whole frames (install numpy, simplejpeg)'),
-      kv('ffmpeg', a.ffmpeg || 'Not found'), kv('Python', a.python)),
-    ));
+      kv('ffmpeg', a.ffmpeg || 'Not found'), kv('Python', a.python))));
 }
 
 // ------------------------------------------------------ sign-in & pairing ---
@@ -288,10 +288,10 @@ async function securitySheet() {
 
 // A QR code a new device scans: the address and, with sign-in on, the key.
 function pairSheet(st) {
-  const order = ['Local network', 'Tailscale', 'Other'];
-  let ips = [...st.ips].sort((a, b) => order.indexOf(netName(a)) - order.indexOf(netName(b)));
+  let ips = byNet(st.ips);
   // WSL / Hyper-V adapters are unreachable from a phone: only offer others if there's nothing better
   if (ips.some(ip => netName(ip) !== 'Other')) ips = ips.filter(ip => netName(ip) !== 'Other');
+  if (!ips.length) ips = [location.hostname];
   let pick = ips[0];
   const seg = h('div', { class: 'seg' }), qr = h('div', { class: 'qr' }), link = h('div', { class: 'foot', style: 'margin:0;word-break:break-all' });
   const address = () => `http://${pick}:${st.port}/`;

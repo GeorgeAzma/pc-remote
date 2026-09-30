@@ -553,7 +553,7 @@ def about():
             "displays": [{k: d[k] for k in ("name", "w", "h", "hz", "primary")} for d in win32.displays()],
             "ips": [ip for ip in certs.local_ips() if ip != "127.0.0.1"],
             "encoders": {"h264": vs.get("h264"), "hevc": vs.get("hevc")}, "tiles": tiles.available(),
-            "token": bool(os.environ.get("PC_API_TOKEN")) or auth.required(), "certificate": _certificate()}
+            "sign_in": bool(os.environ.get("PC_API_TOKEN")) or auth.required(), "certificate": _certificate()}
 
 
 @command("sysmon", "Live system monitor: every core, memory, GPU, disks, network, top processes.", hide=True)

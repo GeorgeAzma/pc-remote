@@ -3,8 +3,8 @@ REM Launcher for the PC Remote server (see README.md).
 REM Runs headless (no console window) using pythonw; errors go to server.log.
 REM Prefers the venv interpreter if present, else falls back to global pythonw.
 REM
-REM Optional: set a token so only you can control your PC, then open
-REM   http://<PC-IP>:1024/?token=YOUR_TOKEN   (or https:// for the HD stream)
+REM Sign-in is built in (Controls -> About -> Sign-in & devices). Optional
+REM extra: a fixed token, which also lets a device in via /?token=YOUR_TOKEN
 set PC_API_TOKEN=
 set PC_API_HOST=0.0.0.0
 set PC_API_PORT=1024

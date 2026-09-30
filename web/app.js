@@ -56,7 +56,7 @@ function signIn() {
   };
   inp.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
   sheet({ title: 'Sign in', body: h('div', { class: 'form' },
-    h('div', { class: 'note' }, 'Enter the access code or your password. On the PC, PC Remote in the Start menu shows the code and a QR code; a signed-in device can show the QR code too (Controls \u2192 About \u2192 Sign-in & devices).'),
+    h('div', { class: 'note' }, 'Enter the access code or your password. The code is on the PC: open PC Remote from the Start menu.'),
     inp, h('button', { class: 'btn', onclick: go }, 'Sign in')),
     onClose: () => { asking = false; } });
   setTimeout(() => inp.focus(), 300);

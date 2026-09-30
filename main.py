@@ -22,7 +22,6 @@ Environment:
 """
 import win32  # noqa: I001 - first: sets per-monitor DPI awareness before any metrics call
 
-import faulthandler
 import hmac
 import ipaddress
 import json
@@ -147,8 +146,10 @@ class Handler(BaseHTTPRequestHandler):
         return ""
 
     def _local(self) -> bool:
-        """The PC itself: never asked to sign in (it's where you'd see the code)."""
-        return self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+        """The PC itself: never asked to sign in (it's where you'd see the code).
+        Not when a proxy on the PC (e.g. Tailscale Serve) forwards someone else."""
+        return (self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+                and not self.headers.get("X-Forwarded-For") and not self.headers.get("Forwarded"))
 
     def _credential(self, query) -> str:
         return query.get("token", [""])[0] or self.headers.get("X-Token", "") or self._cookie_token()
@@ -161,6 +162,7 @@ class Handler(BaseHTTPRequestHandler):
         if self._local() or not (auth.required() or TOKEN) or self._signed_in(query):
             return True
         if reply:
+            self.close_connection = True  # the request body (if any) goes unread
             self._json(401, {"error": "sign in required"})
         return False
 
@@ -282,14 +284,12 @@ class Handler(BaseHTTPRequestHandler):
         commands.record()
         if not self._guard():
             return
-        if route != "/upload":
-            length = int(self.headers.get("Content-Length") or 0)
-            try:
-                body = json.loads(self.rfile.read(min(length, 1 << 20)) or b"{}") if length else {}
-            except ValueError:
-                return self._json(400, {"error": "invalid JSON body"})
         if route == "/api/login":  # public, rate-limited per address
-            key, wait = auth.login(self.client_address[0], str((body or {}).get("password", "")))
+            body = self._body(limit=4096)
+            if body is None:
+                return
+            password = body.get("password") if isinstance(body, dict) else None
+            key, wait = auth.login(self.client_address[0], password if isinstance(password, str) else "")
             if key:
                 return self._json(200, {"key": key})
             return self._json(429 if wait else 403, {"error": f"too many tries, wait {wait} s" if wait else "wrong code or password",
@@ -298,18 +298,34 @@ class Handler(BaseHTTPRequestHandler):
             return
         if route == "/upload":
             return self._upload(query)
+        body = self._body()
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            body = {}
         if route == "/api/security":
-            b = body if isinstance(body, dict) else {}
             try:
-                auth.update(enabled=b.get("enabled"), password=b.get("password"),
-                            new_code=bool(b.get("new_code")), new_key=bool(b.get("new_key")))
+                auth.update(enabled=body.get("enabled"), password=body.get("password"),
+                            new_code=bool(body.get("new_code")), new_key=bool(body.get("new_key")))
             except ValueError as exc:
                 return self._json(400, {"error": str(exc)})
             return self._json(200, self._security())
         args = {k: v[0] for k, v in query.items()}
-        if isinstance(body, dict):
-            args.update(body)
+        args.update(body)
         return self._command(route.lstrip("/"), args)
+
+    def _body(self, limit=None):
+        """The JSON request body ({} if none), or None after replying with an error."""
+        length = int(self.headers.get("Content-Length") or 0)
+        if limit is not None and length > limit:
+            self.close_connection = True
+            self._json(413, {"error": "request too large"})
+            return None
+        try:
+            return json.loads(self.rfile.read(length) or b"{}") if length else {}
+        except ValueError:
+            self._json(400, {"error": "invalid JSON body"})
+            return None
 
     def _index(self, query):
         headers = []
@@ -479,11 +495,8 @@ def main():
     if sys.stderr is None:  # no console: keep a small log instead
         logging.basicConfig(filename=os.path.join(paths.DATA, "server.log"), level=logging.WARNING,
                             format="%(asctime)s %(levelname)s %(message)s")
-        faulthandler.enable(logging.getLogger().handlers[0].stream)
     else:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
-        faulthandler.enable()
-    # (a native crash - a driver call, ctypes - then leaves a traceback of every thread)
     # a crash in a worker thread would otherwise vanish without a console
     threading.excepthook = lambda a: log.error("thread %s crashed", a.thread and a.thread.name,
                                                exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
