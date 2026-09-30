@@ -919,3 +919,58 @@ class SystemStats:
 
 kernel32.GetTickCount64.restype = ctypes.c_uint64
 STATS = SystemStats()
+
+
+# ==========================================================================
+# App icons (for the Open app / Running apps lists)
+# ==========================================================================
+class _SHFILEINFOW(ctypes.Structure):
+    _fields_ = [("hIcon", HANDLE), ("iIcon", ctypes.c_int), ("dwAttributes", wintypes.DWORD),
+                ("szDisplayName", ctypes.c_wchar * 260), ("szTypeName", ctypes.c_wchar * 80)]
+
+
+_shell32 = ctypes.WinDLL("shell32")
+_shell32.SHGetFileInfoW.restype = ctypes.c_void_p
+_shell32.SHGetFileInfoW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(_SHFILEINFOW), wintypes.UINT, wintypes.UINT]
+_ole32 = ctypes.WinDLL("ole32")
+_DestroyIcon = _fn(user32, "DestroyIcon", wintypes.BOOL, HANDLE)
+_OpenProcess = _fn(kernel32, "OpenProcess", HANDLE, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+_QueryFullProcessImageNameW = _fn(kernel32, "QueryFullProcessImageNameW", wintypes.BOOL, HANDLE, wintypes.DWORD,
+                                  wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
+_CloseHandle = _fn(kernel32, "CloseHandle", wintypes.BOOL, HANDLE)
+
+
+def file_icon_png(path: str) -> bytes | None:
+    """The icon Explorer shows for a file or shortcut, 48x48 PNG with alpha."""
+    _ole32.CoInitializeEx(None, 2)  # the shell wants COM on this thread (no-op if it's there)
+    info = _SHFILEINFOW()
+    if not _shell32.SHGetFileInfoW(path, 0, ctypes.byref(info), ctypes.sizeof(info), 0x4000):  # SHGFI_SYSICONINDEX
+        return None
+    il = LPVOID()
+    iid = _GUID.parse("46eb5926-582e-4017-9fdf-e8998daa0950")  # IImageList
+    if _shell32.SHGetImageList(2, ctypes.byref(iid), ctypes.byref(il)) != 0 or not il:  # SHIL_EXTRALARGE: 48 px
+        return None
+    icon = HANDLE()
+    try:
+        if _com(il, 10, info.iIcon, 1, ctypes.byref(icon),  # IImageList::GetIcon, ILD_TRANSPARENT
+                argtypes=(ctypes.c_int, wintypes.UINT, ctypes.POINTER(HANDLE))) != 0 or not icon:
+            return None
+    finally:
+        _com(il, 2)
+    try:
+        img = cursor_image(icon.value)  # icons and cursors are the same kind of handle
+    finally:
+        _DestroyIcon(icon)
+    return png_encode(img[0], img[1], img[4]) if img else None
+
+
+def process_path(pid: int) -> str | None:
+    """Full path of a running process's program."""
+    h = _OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return None
+    try:
+        buf, n = ctypes.create_unicode_buffer(1024), wintypes.DWORD(1024)
+        return buf.value if _QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)) else None
+    finally:
+        _CloseHandle(h)

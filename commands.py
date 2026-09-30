@@ -360,6 +360,32 @@ def _start_menu_apps() -> dict[str, str]:
     return apps
 
 
+_icons: dict = {}      # program / shortcut path -> PNG (or None)
+_apps_cache = (0.0, {})
+
+
+def app_icon(app: str = "", pid: int = 0, name: str = "") -> bytes | None:
+    """Icon of a Start-menu app (by name) or a running process (by pid). Only
+    paths the server finds itself, never one a client names. A process whose
+    program path Windows won't reveal (elevated or protected) falls back to
+    the Start-menu shortcut of the same name."""
+    global _apps_cache
+    if time.monotonic() - _apps_cache[0] > 60:
+        _apps_cache = (time.monotonic(), _start_menu_apps())
+    menu = _apps_cache[1]
+    path = menu.get(app) if app else win32.process_path(pid) if pid else None
+    if not path and name:
+        low = os.path.splitext(name)[0].lower()
+        path = next((p for n, p in menu.items() if n.lower() == low), None)
+    if not path:
+        return None
+    if path not in _icons:
+        if len(_icons) > 500:
+            _icons.clear()
+        _icons[path] = win32.file_icon_png(path)
+    return _icons[path]
+
+
 @command("apps", "List launchable apps (Start menu).", hide=True)
 def apps():
     return {"apps": sorted(_start_menu_apps(), key=str.lower)}

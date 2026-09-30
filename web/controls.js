@@ -76,6 +76,14 @@ function liveSlider(name, ic, label, value) {
   return new Slider({ ic, label, value, onInput: send }).el;
 }
 
+// The app's own icon, from the PC (lazily, as rows scroll into view); a
+// symbol (or nothing) when it has none.
+function appIcon(q, fallback) {
+  const img = h('img', { class: 'app-ic', src: url('/appicon', q), loading: 'lazy', alt: '', decoding: 'async' });
+  img.addEventListener('error', () => img.replaceWith(fallback ? ico(fallback, 'ic') : h('span', { class: 'app-ic' })), { once: true });
+  return img;
+}
+
 function whenLabel(s) { return s < 60 ? `in ${s}s` : `in ${Math.round(s / 60)} min`; }
 /** Press-and-hold on a power action: run it later, or forcefully. */
 async function timers(name, verb, { force = false } = {}) {
@@ -338,7 +346,7 @@ async function launchSheet() {
   const draw = () => {
     const t = q.value.trim().toLowerCase();
     const hits = apps.filter(a => !t || a.toLowerCase().includes(t)).slice(0, 80);
-    list.replaceChildren(...(hits.length ? hits.map(a => h('button', { class: 'list-row', onclick: () => go(a) }, ico('rocket', 'ic'), h('span', { class: 'nm' }, a)))
+    list.replaceChildren(...(hits.length ? hits.map(a => h('button', { class: 'list-row', onclick: () => go(a) }, appIcon({ app: a }, 'rocket'), h('span', { class: 'nm' }, a)))
       : [h('div', { class: 'empty' }, t ? 'Press Enter to open “' + q.value.trim() + '”' : 'No apps found')]));
     hydrateIcons(list);
   };
@@ -423,6 +431,7 @@ async function processesSheet() {
     let list;
     try { list = (await run('processes', { limit: 40 })).processes; } catch (e) { toast(e.message, { err: true }); return; }
     s.setBody(h('div', { class: 'card' }, list.map(p => h('div', { class: 'list-row' },
+      appIcon({ pid: p.pids[0], name: p.name }),
       h('span', { class: 'nm', style: 'flex:1' }, p.name.replace(/\.exe$/i, ''), p.pids.length > 1 ? h('span', { style: 'color:var(--label3)' }, ` ×${p.pids.length}`) : null),
       h('span', { class: 'meta' }, fmtBytes(p.mem)),
       twoTap(h('button', { class: 'chip', style: 'color:var(--red);margin-left:8px' }, h('span', { 'data-label': '' }, 'End')),

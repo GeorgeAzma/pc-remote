@@ -235,6 +235,21 @@ class Handler(BaseHTTPRequestHandler):
             return self._list_files(query.get("path", [""])[0])
         if route == "/download":
             return self._download(query.get("path", [""])[0])
+        if route == "/appicon":
+            try:
+                png = commands.app_icon(query.get("app", [""])[0], int(query.get("pid", ["0"])[0] or 0),
+                                        query.get("name", [""])[0])
+            except (ValueError, OSError):
+                png = None
+            if not png:
+                return self._json(404, {"error": "no icon"})
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(png)))
+            self.send_header("Cache-Control", "private, max-age=86400")
+            self.end_headers()
+            self.wfile.write(png)
+            return
         if route == "/screenshot.png":
             data = win32.screenshot_png()
             self.send_response(200)
