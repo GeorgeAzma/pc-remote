@@ -13,10 +13,10 @@ A TileEncoder (one per viewer stream) sends whatever changed since its last
 send, as a few merged rectangles, each one JPEG, drawn by the phone over
 its copy of the screen. Changes pile up while the link is busy and go out
 together, from the newest capture, so nothing is lost and nothing queues.
-When most of the screen changed it sends one full-screen JPEG, exactly
-like the plain JPEG stream. Once an area has been still for a moment it's
-resent at a higher quality ("refinement"): moving content stays light,
-still content ends up sharp.
+When most of the screen changed it sends the full screen, as a few
+horizontal bands (browsers decode separate images in parallel). Once an
+area has been still for a moment it's resent at a higher quality
+("refinement"): moving content stays light, still content ends up sharp.
 
 The encoder duck-types video.Encoder for StreamSession; instead of pushing
 finished frames it signals "new content" and the session's sender calls
@@ -28,6 +28,7 @@ import struct
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     import numpy as np
@@ -43,6 +44,18 @@ STILL_S = 0.3       # an area still for this long gets refined
 REFINE_SHARE = 0.25 # screen share refined per message when nothing else changes
 REFINE_SIDE = 0.04  # ... when it travels with live changes (mustn't slow them down)
 FULL_CHECK_S = 1.0  # full comparison this often, in case the hints miss something
+FULL_BANDS = 4      # a full screen goes out as this many horizontal JPEGs: browsers decode
+                    # separate images in parallel (~2.5x faster in Chrome), for ~3% more bytes
+PARALLEL_SHARE = 0.15  # messages covering more of the screen encode their JPEGs in parallel
+
+_pool = None  # simplejpeg releases the GIL, so threads encode truly in parallel
+
+
+def _encoder_pool():
+    global _pool
+    if _pool is None:
+        _pool = ThreadPoolExecutor(max_workers=min(FULL_BANDS, os.cpu_count() or 2), thread_name_prefix="jpeg")
+    return _pool
 
 # ffmpeg MJPEG q:v -> libjpeg quality giving the same size (measured on a desktop screenshot)
 _QV = {1: 92, 2: 88, 3: 82, 4: 76, 5: 70, 6: 63, 7: 57, 8: 50, 9: 47, 10: 43, 11: 40, 12: 37, 13: 34, 14: 31}
@@ -404,13 +417,14 @@ class TileEncoder:
                 dirty = None if full else v.ver > self._taken
                 self._taken, self._full = count, False
             self._refine_posted = False
-            whole = [0, 0, v.tw, v.th]
+            bands = [([0, v.th * i // FULL_BANDS, v.tw, v.th * (i + 1) // FULL_BANDS], self._q)
+                     for i in range(FULL_BANDS) if v.th * i // FULL_BANDS < v.th * (i + 1) // FULL_BANDS]
             if full:
-                jobs = [(whole, self._q)]
+                jobs = bands
             else:
                 jobs = [(r, self._q) for r in merge_rects(dirty)] if dirty.any() else []
                 if sum(_area(r) for r, _ in jobs) > FULL_SHARE * v.tw * v.th:
-                    full, jobs = True, [(whole, self._q)]
+                    full, jobs = True, bands
             if not full:
                 # Still areas get their sharper copy, a band at a time: a small one
                 # next to live changes, a bigger one when nothing else is going on.
@@ -427,13 +441,19 @@ class TileEncoder:
                         budget -= rows * (x1 - x0)
             if not jobs:
                 return None
-            head, blobs = [struct.pack("<H", len(jobs))], []
-            for (tx0, ty0, tx1, ty1), q in jobs:
-                x0, y0, x1, y1 = tx0 * TILE, ty0 * TILE, min(v.w, tx1 * TILE), min(v.h, ty1 * TILE)
-                jpg = simplejpeg.encode_jpeg(np.ascontiguousarray(v.frame[y0:y1, x0:x1]), quality=q,
-                                             colorspace="BGRX", colorsubsampling="420", fastdct=True)
+            rects = [((tx0 * TILE, ty0 * TILE, min(v.w, tx1 * TILE), min(v.h, ty1 * TILE)), q)
+                     for (tx0, ty0, tx1, ty1), q in jobs]
+
+            def encode(job):
+                (x0, y0, x1, y1), q = job
+                return simplejpeg.encode_jpeg(np.ascontiguousarray(v.frame[y0:y1, x0:x1]), quality=q,
+                                              colorspace="BGRX", colorsubsampling="420", fastdct=True)
+            big = len(rects) > 1 and sum(_area(r) for r, _ in rects) > PARALLEL_SHARE * v.w * v.h
+            blobs = list(_encoder_pool().map(encode, rects)) if big else [encode(j) for j in rects]
+            head = [struct.pack("<H", len(rects))]
+            for ((x0, y0, x1, y1), _), jpg in zip(rects, blobs):
                 head.append(_RECT.pack(x0, y0, x1 - x0, y1 - y0, len(jpg)))
-                blobs.append(jpg)
+            for (tx0, ty0, tx1, ty1), q in jobs:
                 self._sent_q[ty0:ty1, tx0:tx1] = q
             payload = b"".join(head + blobs)
             self.frames += 1
