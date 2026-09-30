@@ -15,7 +15,11 @@ Stream modes (the client picks one; see MODES):
                <video> element (Media Source Extensions). Works on plain HTTP
                at H.264 quality, with a little more latency (the muxer holds
                each frame until the next arrives, plus the media pipeline).
-  jpeg         MJPEG, newest frame wins. Any browser; costs far more bandwidth.
+  jpeg         JPEG, for any browser. Normally tiled (tiles.py): only the parts
+               of the screen that changed, as a few small JPEGs the phone paints
+               over its copy; a full-screen change is one plain JPEG. Without
+               numpy/simplejpeg/Pillow, or if in-process capture fails, ffmpeg's
+               MJPEG (a whole JPEG per frame, newest wins) takes over.
 
 Rate control: each client ACKs every frame. Rising ACK delay or in-flight
 backlog means the link is saturated -> lower the encoder's max bitrate;
@@ -35,12 +39,13 @@ import threading
 import time
 from collections import deque
 
+import tiles
 import win32
 
 CREATE_NO_WINDOW = 0x08000000
 ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
 
-KIND_PROBE, KIND_FRAME, KIND_JPEG, KIND_FMP4 = 0, 2, 3, 4
+KIND_PROBE, KIND_FRAME, KIND_JPEG, KIND_FMP4, KIND_TILES = 0, 2, 3, 4, 5
 JPEG_TX_MS = 20      # JPEG while a frame reaches the phone this fast (the H.264 player buffers ~30-50 ms)
 PROBE_BYTES = 32 * 1024
 _HDR = struct.Struct("<BBHId")  # kind, flags, generation, seq, server time (ms)
@@ -76,6 +81,7 @@ def tuning(q: float) -> dict:
         "preset": ("p1", "p2", "p4", "p5", "p6")[min(4, int(q * 4.999))],
         "bpp": 0.12 + 0.3 * q,
         "jpeg": round(8 - 6 * q),
+        "jpeg_still": max(1, round(8 - 6 * q) - 2),  # tiled JPEG: areas that stopped changing
     }
 
 
@@ -127,7 +133,7 @@ def h264_encoders() -> list[str]:
 def status() -> dict:
     caps = capabilities()
     return {"ffmpeg": FFMPEG, "capture": "ddagrab" in caps, "h264": encoders("h264")[:1],
-            "hevc": encoders("hevc")[:1], "mjpeg": "mjpeg" in caps}
+            "hevc": encoders("hevc")[:1], "mjpeg": "mjpeg" in caps or tiles.available()}
 
 
 def hevc_codec_string(c: bytes) -> str:
@@ -501,7 +507,8 @@ class StreamSession:
             w, h = d["w"], d["h"]  # near native: skip scaling (zero-copy, 0% CPU)
         else:
             w, h = max(2, int(d["w"] * s) & ~1), max(2, int(d["h"] * s) & ~1)
-        enc = "mjpeg" if mjpeg else encoders(MODES[mode][0])[0]
+        enc = ("tiles" if tiles.available() and time.monotonic() - _bad_encoders.get("tiles", -1e9) > 60
+               else "mjpeg") if mjpeg else encoders(MODES[mode][0])[0]
         if not ((w, h) == (d["w"], d["h"]) and enc.endswith("_nvenc")):
             fps = min(fps, 120)  # CPU scaling costs ~1 core per 100 fps
         spec = Spec(mode, d, w, h, fps, encoder=enc, t=t)
@@ -539,6 +546,17 @@ class StreamSession:
             if spec is None:
                 return
             now = time.monotonic()
+            cur = self._next or self.enc
+            if (isinstance(cur, tiles.TileEncoder) and cur.alive and spec.encoder == "tiles"
+                    and cur.spec.display is not None and spec.key()[:5] == cur.spec.key()[:5]):
+                # Same display and picture size: new quality / fps apply in
+                # place, without resending the whole screen.
+                cur.retune(spec)
+                if flush:
+                    cur.refresh()
+                with self._cv:
+                    self._last_switch, self._last_reason = now, reason
+                return
             self._restarts.append(now)
             while self._restarts and now - self._restarts[0] > 10:
                 self._restarts.popleft()
@@ -557,7 +575,8 @@ class StreamSession:
                     self._flushing = True
                     self._queue.clear()
                     self._inflight.clear()
-                enc = self._next = Encoder(spec, self._gen, self._on_packet, self._on_exit)
+                cls = tiles.TileEncoder if spec.encoder == "tiles" else Encoder
+                enc = self._next = cls(spec, self._gen, self._on_packet, self._on_exit)
                 enc.reason = reason
             try:
                 enc.start()
@@ -578,7 +597,8 @@ class StreamSession:
         if enc.spec.codec == "mjpeg":  # no codec config in-band; still tell the client what it gets
             self._configs[enc.gen] = {"t": "config", "gen": enc.gen & 0xFFFF, "mode": "jpeg",
                                       "w": enc.spec.w, "h": enc.spec.h, "fps": enc.spec.fps,
-                                      "jq": enc.spec.t["jpeg"], "reason": enc.reason}
+                                      "jq": enc.spec.t["jpeg"], "reason": enc.reason,
+                                      "tiles": enc.spec.encoder == "tiles"}
         self._queue = deque(f for f in self._queue if f[0] == enc.gen)
         self._latest = None
         self._last_jpeg = None
@@ -608,7 +628,16 @@ class StreamSession:
                 self._promote(enc)
             elif self._flushing:
                 return  # frames were dropped: the old stream can't be decoded past the gap
-            if kind == "jpeg":
+            if kind == "tiles":
+                # New content (or a still area due for its sharper copy): the
+                # sender builds the message from the newest pixels when the
+                # link has room; changes pile up in the meantime.
+                if payload == "change":
+                    self._j["prod"] += 1
+                    if self._latest is not None:
+                        self._j["skip"] += 1
+                self._latest = (enc.gen, enc, now_ms())
+            elif kind == "jpeg":
                 if payload == self._last_jpeg:
                     return  # screen unchanged
                 self._last_jpeg = payload
@@ -648,6 +677,8 @@ class StreamSession:
         # A lock screen / UAC prompt / mode change breaks *capture*; only
         # blame the encoder when ffmpeg says the encoder failed.
         capture = any(w in low for w in ("ddagrab", "dxgi", "duplicat", "access denied", "e_accessdenied"))
+        if enc.spec.encoder == "tiles" and enc.first_frame is None:
+            _bad_encoders["tiles"] = time.monotonic()  # in-process capture failed: ffmpeg MJPEG for a while
         if (enc.first_frame is None and enc.spec.mode != "jpeg" and not capture
                 and ("encod" in low or enc.spec.encoder.split("_")[-1] in low)):
             if enc.spec.encoder in encoders(enc.spec.codec) and len(encoders(enc.spec.codec)) > 1:
@@ -755,6 +786,18 @@ class StreamSession:
                 if len(item) == 5:
                     gen, key, data, t, kind = item
                     flags = 1 if key else 0
+                elif isinstance(item[1], tiles.TileEncoder):
+                    gen, enc, _ = item
+                    built = enc.take()  # encodes now, from the newest pixels
+                    if built is None:
+                        continue
+                    data, t, full, more = built
+                    kind, flags = KIND_TILES, 1 if full else 0
+                    with self._cv:
+                        j = self._j
+                        j["size"] = len(data) if not j["size"] else 0.9 * j["size"] + 0.1 * len(data)
+                        if more and self._latest is None:
+                            self._latest = (gen, enc, now_ms())  # more still areas to sharpen
                 else:
                     gen, data, t = item
                     kind, flags = KIND_JPEG, 1
@@ -800,7 +843,7 @@ class StreamSession:
                 while self._small_rtts and t - self._small_rtts[0][0] > 10_000:
                     self._small_rtts.popleft()
                 prop = min([r for _, r in self._small_rtts] + [r for _, r in self._prop] or [base])
-                if sent[2] == KIND_JPEG:  # send -> fully received, minus propagation
+                if sent[2] in (KIND_JPEG, KIND_TILES):  # send -> fully received, minus propagation
                     self._j["delays"].append((t, max(0.0, rtt - prop)))
                 if sent[1] >= 16_000 and rtt - prop > 0.5:
                     self._bw.append((t, sent[1] * 8 / ((rtt - prop) / 1000)))

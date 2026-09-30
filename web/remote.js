@@ -502,7 +502,7 @@ export const QUALITY = [
 export const qualityLevel = q => QUALITY[Math.round(q * 4)];
 
 // =============================================================== video ===
-const HDR = 16, KIND_FRAME = 2, KIND_JPEG = 3, KIND_FMP4 = 4;
+const HDR = 16, KIND_FRAME = 2, KIND_JPEG = 3, KIND_FMP4 = 4, KIND_TILES = 5;
 const supported = new Set();  // codec strings the decoder accepted
 const vid = $('screen-video');
 function surface(kind) {
@@ -584,7 +584,7 @@ if (vid.requestVideoFrameCallback) {
 
 const video = {
   ws: null, mode: null, dec: null, cfg: null, gen: -1, retry: 0, ctx: null, want: null,
-  sentCfg: '', cfgTimer: 0, offset: 0, rtt: 0, needKey: true, jpegBusy: false, jpegNext: null,
+  sentCfg: '', cfgTimer: 0, offset: 0, rtt: 0, needKey: true, jpegBusy: false, jpegNext: null, tileQ: [], tileBusy: false,
   st: { frames: 0, bytes: 0, t: performance.now(), fps: 0, mbps: 0, lat: 0, dec: 0, buf: 0, server: null },
   lastDraw: 0, times: new Map(), held: null,
 
@@ -651,7 +651,7 @@ const video = {
         toast(m.mode === 'jpeg' ? 'Connection improved — back to JPEG' : 'Slow connection — switched to H.264',
               { ic: 'pulse', ms: 2200 });
       this.mode = m.mode;
-      if (m.mode === 'jpeg') { this.cfg = m; this.gen = m.gen; mse.reset(); surface('canvas'); message(null); }
+      if (m.mode === 'jpeg') { this.cfg = m; this.gen = m.gen; this.tileQ = []; mse.reset(); surface('canvas'); message(null); }
       else this.configure(m);
     } else if (m.t === 'stats') {
       this.st.server = m;
@@ -727,6 +727,12 @@ const video = {
       if (gen === this.gen) mse.append(new Uint8Array(buf, HDR), t);
       return;
     }
+    if (kind === KIND_TILES) {
+      if (gen !== this.gen) return;
+      this.tileQ.push({ buf, t, gen, full: key });
+      if (!this.tileBusy) this.drawTiles();
+      return;
+    }
     if (kind === KIND_JPEG) {
       this.jpegNext = { data: new Blob([new Uint8Array(buf, HDR)], { type: 'image/jpeg' }), t };
       if (!this.jpegBusy) this.decodeJpeg();
@@ -761,6 +767,41 @@ const video = {
       } catch {}
     }
     this.jpegBusy = false;
+  },
+  // Tiled JPEG: the changed parts of the screen, painted over what's there.
+  // Unlike whole JPEGs none can be skipped, except by a full-screen one.
+  async drawTiles() {
+    this.tileBusy = true;
+    while (this.tileQ.length) {
+      let i = this.tileQ.length - 1;
+      while (i > 0 && !this.tileQ[i].full) i--;
+      const { buf, t, gen } = this.tileQ[i];
+      this.tileQ.splice(0, i + 1);
+      const dv = new DataView(buf, HDR), n = dv.getUint16(0, true), rects = [];
+      let off = HDR + 2 + n * 12;
+      for (let k = 0; k < n; k++) {
+        const o = 2 + k * 12, len = dv.getUint32(o + 8, true);
+        rects.push({ x: dv.getUint16(o, true), y: dv.getUint16(o + 2, true),
+                     blob: new Blob([new Uint8Array(buf, off, len)], { type: 'image/jpeg' }) });
+        off += len;
+      }
+      const t1 = performance.now();
+      let bmps;
+      try { bmps = await Promise.all(rects.map(r => createImageBitmap(r.blob))); }
+      catch { this.tileQ = []; this.send({ t: 'kf' }); continue; }  // a broken image: resend the whole screen
+      if (gen !== this.gen) { bmps.forEach(b => b.close()); continue; }
+      if (canvas.hidden) surface('canvas');
+      const c = this.cfg;
+      if (c && (canvas.width !== c.w || canvas.height !== c.h)) { canvas.width = c.w; canvas.height = c.h; }
+      rects.forEach((r, k) => { this.ctx.drawImage(bmps[k], r.x, r.y); bmps[k].close(); });
+      const now = performance.now();
+      this.st.dec = 0.9 * this.st.dec + 0.1 * (now - t1);
+      if (this.offset) this.st.lat = 0.9 * this.st.lat + 0.1 * (now + this.offset - t);
+      this.st.frames++;
+      this.lastDraw = now;
+      if (stageMsgShown) message(null);
+    }
+    this.tileBusy = false;
   },
   draw(frame, seq) {
     if (canvas.hidden) surface('canvas');
@@ -799,7 +840,7 @@ setInterval(() => {
   if (settings.stats) {
     // Server figures only when they describe what's actually streaming; unknown ones are left out, not shown as '?'.
     const srv = sv.mode === video.mode ? sv : {};
-    const enc = video.mode === 'jpeg' ? 'MJPEG' : `${video.mode === 'hevc' ? 'HEVC' : 'H.264'} ${srv.enc || ''}`;
+    const enc = video.mode === 'jpeg' ? (srv.enc === 'tiles' ? 'JPEG tiles' : 'MJPEG') : `${video.mode === 'hevc' ? 'HEVC' : 'H.264'} ${srv.enc || ''}`;
     const tune = [video.mode === 'jpeg' ? srv.jq != null && `q:v ${srv.jq}` : srv.cq != null && `cq ${srv.cq} ${srv.preset}`,
                   srv.qd != null && `queue ${srv.qd} ms`].filter(Boolean).join('  ');
     hud.textContent = [

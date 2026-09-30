@@ -4,6 +4,10 @@
 # HTTPS (phones need it for the low-latency H.264 stream)
 cryptography>=42
 
+# Tiled JPEG stream (only what changed on screen); without them JPEG uses ffmpeg
+numpy>=1.26
+simplejpeg>=1.7
+
 # Master volume / mute (Windows.Media) and Wi-Fi / Bluetooth radios
 winrt-runtime==3.2.1
 winrt-Windows.Foundation==3.2.1

@@ -32,9 +32,10 @@ so it opens full-screen, like an app.
 
 **HD stream (recommended).** Browsers only allow the lowest-latency H.264
 decoder (WebCodecs) on secure pages. Over plain `http://` the stream uses
-JPEG, which is just as quick on a decent Wi-Fi but uses far more bandwidth.
-It switches itself to H.264 in a video player (30–50 ms slower) when the
-link is too slow for JPEG. Tap **HD** on the screen, or open
+tiled JPEG: only the parts of the screen that changed are sent, so it's
+just as quick and light for typical use, but a full-screen video costs far
+more bandwidth than H.264. It switches itself to H.264 in a video player
+(30–50 ms slower) when the link is too slow for JPEG. Tap **HD** on the screen, or open
 `https://<PC-IP>:1024/`, to get both low latency and low bandwidth. The server makes
 its own certificate, so accept the warning once. To get rid of the warning
 for good, download `/ca.crt` on the phone and install it as a trusted CA
@@ -123,7 +124,29 @@ NVENC H.264: ultra-low-latency, no B-frames, infinite GOP, constant quality with
 | H.264 (Automatic on HTTPS) | HTTPS | lowest | 1× |
 | HEVC | HTTPS + HEVC decoder | lowest | ~0.7× |
 | Video player (MSE) | any modern browser | +30–50 ms | 1× |
-| JPEG (Automatic on HTTP) | anything | lowest on a fast link | ~3–10× |
+| JPEG (Automatic on HTTP) | anything | lowest on a fast link | small changes: ~1×; full-screen motion: ~10× |
+
+**Tiled JPEG.** The server captures the screen itself (DXGI desktop
+duplication) and shrinks it to the stream size on the GPU. Windows reports
+which areas changed; the server treats that as a hint and compares those
+32×32-pixel tiles with the previous frame, so what it sends is exact (plus a
+full comparison once a second, in case a report was missed).
+
+- Only the changed tiles are sent, merged into a few rectangles, one small
+  JPEG each; the phone paints them over its copy of the screen.
+- When more than half the screen changed, it sends one full-screen JPEG
+  instead, so decoding costs the same as a plain JPEG stream.
+- Changes pile up while the link is busy and go out together, encoded from
+  the newest capture, so nothing queues and nothing is lost.
+- An area that has been still for 0.3 s is resent at a higher quality, so
+  still content ends up sharper than moving content.
+
+Measured with a 1168×658 viewer, a small animation in a screen corner:
+3–4 Mb/s and 1–2 ms latency (whole-screen JPEG: ~30 Mb/s), and it stayed
+on JPEG down to a 6 Mb/s link. For full-screen motion it matches the plain
+JPEG stream (browser decode 2.8 vs 3.5 ms per frame), at about a third of
+the CPU. It needs `numpy` and `simplejpeg`; without them, or with
+`PC_JPEG_TILES=0`, JPEG uses ffmpeg (a whole JPEG per frame).
 
 **Adaptive JPEG.** JPEG is paced to about 75% of the link's measured
 capacity, so it never floods the Wi-Fi; a full link would also slow down
@@ -135,7 +158,8 @@ the phone, from its ACK minus the network's round-trip time:
 - If that can't help, Automatic switches to the H.264 player.
 - It tries JPEG again later, waiting longer after each failed try.
 
-In a simulated-link test, the median delivery delay for a phone-sized
+In a simulated-link test with whole-screen JPEG frames (full-screen motion,
+or the ffmpeg fallback), the median delivery delay for a phone-sized
 picture was:
 
 | Link | Stream | Delivery delay (median) |
@@ -182,6 +206,8 @@ def say(text: str = ""):
 | `main.py` | HTTP/HTTPS server, routing, auth, uploads/downloads |
 | `commands.py` | `@command` registry and every PC action |
 | `video.py` | ffmpeg capture/encode pipeline, per-viewer rate control |
+| `tiles.py` | tiled JPEG: change tracking, rectangles, refinement |
+| `dxgicap.py` | ctypes DXGI desktop duplication and GPU shrinking |
 | `remote.py` | input WebSocket, cursor and clipboard broadcast |
 | `terminal.py` | persistent ConPTY shell sessions |
 | `win32.py` | ctypes: input injection, clipboard, cursor shapes, displays, audio, stats |
