@@ -359,7 +359,10 @@ async function boot() {
   hydrateIcons();
   fitViewport();
   document.querySelectorAll('[data-tabs]').forEach(el => tabSwitch(el));
-  try { INFO = await api('/api/info'); } catch (e) { if (!/Token/.test(e.message)) toast('Server unreachable', { err: true }); }
+  try { INFO = await api('/api/info'); } catch (e) {
+    INFO.error = e.message;  // (views show this instead of guessing from empty info)
+    toast('Server unreachable', { err: true });  // (not while the sign-in sheet is up)
+  }
   document.title = (INFO.host || 'PC') + ' · Remote';
   const [remote, term, controls, monitor] = await Promise.all([import('./remote.js'), import('./term.js'), import('./controls.js'),
                                                             import('./monitor.js')]);

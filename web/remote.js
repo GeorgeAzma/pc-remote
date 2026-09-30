@@ -652,6 +652,7 @@ const video = {
 
   start() {
     if (this.ws) return;
+    if (INFO.error) { message(/Sign in/.test(INFO.error) ? 'Sign in to see the screen.' : 'Can’t reach the PC.'); return; }
     if (!INFO.video?.ffmpeg) { message('Screen streaming needs <b>ffmpeg</b> on the PC.<br><code>winget install Gyan.FFmpeg</code> then restart the server.'); return; }
     this.plan = resolvePlan();
     this.mode = this.plan.mode;  // what is actually streaming (the server may use plan.alt)
