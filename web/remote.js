@@ -379,21 +379,21 @@ function layout() {
   const cs = getComputedStyle(root);
   const W = root.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
   const H = root.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
-  const typing = document.body.classList.contains('kb-open'), noPad = !!settings.hidePad;
-  root.classList.toggle('no-pad', noPad);
+  const typing = document.body.classList.contains('kb-open'), noPanel = !!settings.hidePanel && !typing;
+  root.classList.toggle('no-panel', noPanel);
   // Stacked (screen above the pad) vs side-by-side (controls on the right):
   // use whichever gives the bigger picture.
   const others = [strip, kb.closest('.inputbar'), $('clip-pill')].filter(x => !x.classList.contains('hidden'))
     .reduce((a, x) => a + (x.offsetHeight || 36) + gap, 0);
-  const minPad = typing || noPad ? 0 : Math.max(120, Math.min(220, H * 0.24));
+  const minPad = typing ? 0 : Math.max(120, Math.min(220, H * 0.24));
   const stackedW = Math.max(0, Math.min(W, (H - others - minPad - gap) * ar));
-  // Without the pad the side panel only holds keys + input: give the picture its width.
-  const panel = noPad ? clamp(W - gap - H * ar, 240, clamp(W * 0.3, 260, 380)) : clamp(W * 0.3, 260, 380);
+  const panel = clamp(W * 0.3, 260, 380);
   const sideW = Math.max(0, Math.min(W - panel - gap, H * ar));
-  const side = !typing && sideW > stackedW * 1.08 && H >= 200;
-  root.classList.toggle('side', side);
+  const side = !typing && sideW > stackedW * 1.08 && H >= 200;  // where the panel goes when shown
+  root.classList.toggle('side', side && !noPanel);
   root.style.setProperty('--panel-w', panel + 'px');
-  let w = side ? sideW : stackedW, hh = w / ar;
+  panelPill(side);
+  let w = noPanel ? Math.min(W, H * ar) : side ? sideW : stackedW, hh = w / ar;
   if (typing && hh < 60) { w = 0; hh = 0; }
   w = Math.max(0, Math.floor(w)); hh = Math.max(0, Math.floor(hh));
   stage.style.width = w + 'px';
@@ -405,6 +405,16 @@ function layout() {
   }
 }
 new ResizeObserver(() => layout()).observe(stage.parentElement);
+// Sidebar-style toggle for the trackpad / keys / input panel (a bigger picture
+// for watching videos; the picture itself still takes taps and keys).
+// The icon shows where the panel sits: filled while shown, empty while hidden.
+function panelPill(side) {
+  const p = $('panel-pill'), off = !!settings.hidePanel, name = (side ? 'sideR' : 'sideB') + (off ? 'off' : '');
+  if (p.dataset.ic === name) return;
+  p.dataset.ic = name;
+  p.innerHTML = icon(name);
+  p.setAttribute('aria-label', p.title = off ? 'Show trackpad and keys' : 'Hide trackpad and keys');
+}
 bus.addEventListener('layout', () => active && layout());
 
 // ====================================================== stream methods ===
@@ -1079,22 +1089,13 @@ gestures(stage, { direct: true });
 const hideHint = () => $('pad-hint').classList.add('gone');
 pad.addEventListener('pointerdown', hideHint, { once: true });
 pad.addEventListener('wheel', hideHint, { once: true, passive: true });
-// Hide the trackpad for a bigger picture (watching videos); the picture itself still takes taps.
-const padBtn = $('btn-pad');
-function applyPad() {
-  const off = !!settings.hidePad;
-  padBtn.innerHTML = icon(off ? 'collapse' : 'expand');
-  padBtn.setAttribute('aria-label', padBtn.title = off ? 'Show trackpad' : 'Hide trackpad');
-  if (active) layout();
-}
-padBtn.addEventListener('click', () => { haptic(5); setSetting('hidePad', !settings.hidePad); });
-applyPad();
+$('panel-pill').addEventListener('click', () => { haptic(5); setSetting('hidePanel', !settings.hidePanel); });
 renderStrip();
 updateDisplayPill();
 bus.addEventListener('settings', e => {
   const k = e.detail.key;
   if (k === 'stats') $('hud').classList.toggle('hidden', !settings.stats);
-  if (k === 'hidePad') applyPad();
+  if (k === 'hidePanel' && active) layout();
   if (!active || !video.ws) return;
   if (k === 'stream' && JSON.stringify(resolvePlan()) !== JSON.stringify(video.plan)) { video.stop(); video.start(); }
   else if (k === 'quality') video.wantConfig();  // debounced, seamless switch

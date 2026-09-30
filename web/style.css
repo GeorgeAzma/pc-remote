@@ -57,6 +57,10 @@ svg.i { width: 1em; height: 1em; display: block; fill: none; stroke: currentColo
 body.kb-open #app { padding-bottom: 0; }
 .view { position: absolute; left: 0; right: 0; top: var(--safe-t); bottom: calc(var(--tabbar-h) + var(--safe-b));
   display: none; }
+/* folded tab bar: only a slim strip with a grab handle remains */
+body.tabs-off #app { padding-bottom: calc(12px + var(--safe-b)); }
+body.tabs-off .view { bottom: calc(12px + var(--safe-b)); }
+body.tabs-off .tabbar { display: none; }
 body.kb-open .view { bottom: 0; }
 .view.active { display: block; }
 .tabbar { position: fixed; left: 0; right: 0; bottom: 0; height: calc(var(--tabbar-h) + var(--safe-b));
@@ -68,6 +72,14 @@ body.kb-open .tabbar { display: none; }
 .tabbar button span { font-size: 24px; }
 .tabbar button b { font-size: 10.5px; font-weight: 500; letter-spacing: .1px; }
 .tabbar button.active { color: var(--tint); }
+.tabbar .tabs-hide { flex: none; width: 44px; font-size: 18px; color: var(--label3); }
+.tabs-handle { display: none; position: fixed; left: 50%; bottom: var(--safe-b); width: 96px; height: 20px;
+  margin-left: -48px; z-index: 20; }
+.tabs-handle::after { content: ""; position: absolute; left: 30px; right: 30px; bottom: 4px; height: 4px;
+  border-radius: 2px; background: var(--label3); transition: background .15s; }
+.tabs-handle:hover::after, .tabs-handle:active::after { background: var(--label2); }
+body.tabs-off .tabs-handle { display: block; }
+body.kb-open .tabs-handle { display: none; }
 
 /* ---------------- common controls ---------------- */
 .icon-btn { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; font-size: 20px;
@@ -78,6 +90,7 @@ body.kb-open .tabbar { display: none; }
   background: rgba(0,0,0,.55); color: #fff; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums;
   backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); pointer-events: auto; white-space: nowrap; }
 .pill.accent { background: var(--tint); }
+.pill.ic { padding: 0 7px; font-size: 16px; }
 .seg { display: inline-flex; background: var(--fill2); border-radius: 9px; padding: 2px; gap: 2px; }
 .seg button { padding: 5px 11px; border-radius: 7px; font-size: 13px; font-weight: 600; color: var(--label2); white-space: nowrap; }
 .seg button.on { background: var(--bg4); color: var(--label); box-shadow: 0 1px 3px rgba(0,0,0,.2); }
@@ -124,9 +137,10 @@ body.kb-open .tabbar { display: none; }
   touch-action: none; user-select: none; -webkit-user-select: none; outline: none; overflow: hidden;
   border: .5px solid var(--sep); }
 .pad:focus-visible { box-shadow: 0 0 0 2px var(--tint); }
-body.kb-open .pad, .remote.no-pad .pad { display: none; }
-/* no trackpad: the picture centres in the freed space, keys stay at the bottom */
-.remote.no-pad:not(.side) .stage { margin: auto 0; }
+body.kb-open .pad { display: none; }
+/* panel hidden: only the picture, centred */
+.remote.no-panel > :not(.stage) { display: none !important; }
+.remote.no-panel .stage { margin: auto 0; }
 .pad-hint { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
   justify-content: center; gap: 4px; color: var(--label3); font-size: 12px; pointer-events: none; transition: opacity .6s; }
 .pad-hint.gone { opacity: 0; }

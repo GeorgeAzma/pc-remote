@@ -51,11 +51,13 @@ function askToken() {
 // ------------------------------------------------------------ settings ---
 const DEFAULTS = {
   speed: 1, accel: 0.6, scroll: 1, natural: true, touch: 'direct', stream: 'auto', quality: 0.5,
-  stats: false, haptics: true, termFont: 13, tab: 'remote', recents: [], shell: 'ps', hidePad: false,
+  stats: false, haptics: true, termFont: 13, tab: 'remote', recents: [], shell: 'ps',
+  hidePanel: false, hideTabs: false,
 };
 export const settings = { ...DEFAULTS, ...(JSON.parse(store('settings') || '{}')) };
 delete settings.fps;    // superseded by the Speed <-> Quality slider (+ display refresh)
 delete settings.maxbr;  // bitrate follows the measured link
+if ('hidePad' in settings) { settings.hidePanel = settings.hidePad; delete settings.hidePad; }
 if ('codec' in settings) {  // pre-"stream" setting name
   if (settings.codec !== 'auto') settings.stream = settings.codec;
   delete settings.codec;
@@ -327,7 +329,12 @@ export let INFO = { shells: [], displays: [], video: {} };
 async function boot() {
   hydrateIcons();
   fitViewport();
-  document.querySelectorAll('.tabbar button').forEach(b => b.addEventListener('click', () => { haptic(5); showTab(b.dataset.tab); }));
+  document.querySelectorAll('.tabbar button[data-tab]').forEach(b => b.addEventListener('click', () => { haptic(5); showTab(b.dataset.tab); }));
+  // The tab bar can fold away to a small handle, leaving the room to the view.
+  const tabs = () => { document.body.classList.toggle('tabs-off', !!settings.hideTabs); fitViewport(); };
+  document.getElementById('tabs-hide').addEventListener('click', () => { haptic(5); setSetting('hideTabs', true); tabs(); });
+  document.getElementById('tabs-show').addEventListener('click', () => { haptic(5); setSetting('hideTabs', false); tabs(); });
+  tabs();
   try { INFO = await api('/api/info'); } catch (e) { if (!/Token/.test(e.message)) toast('Server unreachable', { err: true }); }
   document.title = (INFO.host || 'PC') + ' · Remote';
   const [remote, term, controls] = await Promise.all([import('./remote.js'), import('./term.js'), import('./controls.js')]);
