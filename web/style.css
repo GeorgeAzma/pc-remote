@@ -140,7 +140,13 @@ body.kb-open .tabs-handle { display: none; }
 body.kb-open .pad { display: none; }
 /* panel hidden: only the picture, centred */
 .remote.no-panel > :not(.stage) { display: none !important; }
-.remote.no-panel .stage { margin: auto 0; }
+.remote.no-panel .stage { margin: auto 0; border-radius: 0; }
+/* theater (Remote with the panel hidden): edge to edge, black bars, the tab handle floats over the picture */
+body.theater { background: #000; }
+body.theater .remote { padding: 0; }
+body.theater.tabs-off #app { padding-bottom: var(--safe-b); }
+body.theater.tabs-off .view { bottom: var(--safe-b); }
+body.theater .tabs-handle::after { background: rgba(255,255,255,.35); }
 .pad-hint { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
   justify-content: center; gap: 4px; color: var(--label3); font-size: 12px; pointer-events: none; transition: opacity .6s; }
 .pad-hint.gone { opacity: 0; }

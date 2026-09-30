@@ -376,11 +376,13 @@ $('zoom-pill').addEventListener('click', () => { haptic(6); setView(1, 0, 0); })
 function layout() {
   const root = stage.parentElement;
   const d = disp(), ar = d.w / d.h, gap = 8;
+  const typing = document.body.classList.contains('kb-open'), noPanel = !!settings.hidePanel && !typing;
+  root.classList.toggle('no-panel', noPanel);
+  // Before measuring: it changes the padding. Only while this tab is showing (resize callbacks fire after hide()).
+  document.body.classList.toggle('theater', noPanel && root.closest('.view').classList.contains('active'));
   const cs = getComputedStyle(root);
   const W = root.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
   const H = root.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
-  const typing = document.body.classList.contains('kb-open'), noPanel = !!settings.hidePanel && !typing;
-  root.classList.toggle('no-panel', noPanel);
   // Stacked (screen above the pad) vs side-by-side (controls on the right):
   // use whichever gives the bigger picture.
   const others = [strip, kb.closest('.inputbar'), $('clip-pill')].filter(x => !x.classList.contains('hidden'))
@@ -1112,6 +1114,7 @@ export function show() {
 }
 export function hide() {
   active = false;
+  document.body.classList.remove('theater');
   video.stop();
 }
 hydrateIcons(document.getElementById('view-remote'));
