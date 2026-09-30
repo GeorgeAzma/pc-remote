@@ -222,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._file(certs.CA_CERT, "application/x-x509-ca-cert", attachment="pc-remote-ca.crt")
         if not self._authorized(query):
             return
-        if route in ("/ws", "/vstream", "/term"):
+        if route in ("/ws", "/vstream", "/term", "/sysmon/live"):
             return self._websocket(route, query)
         if route == "/api/info":
             return self._json(200, self._info())
@@ -312,6 +312,9 @@ class Handler(BaseHTTPRequestHandler):
                 video.StreamSession(ws).run()
             elif route == "/ws":
                 remote.InputSession(ws).run()
+            elif route == "/sysmon/live":
+                import sysmon
+                sysmon.MONITOR.serve(ws)
             else:
                 terminal.serve(ws, query)
         finally:

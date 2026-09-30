@@ -402,7 +402,7 @@ textarea.input { height: auto; min-height: 88px; padding: 10px 12px; resize: ver
 .spark { width: 100%; height: 44px; display: block; border-radius: 8px; background: color-mix(in srgb, var(--bg) 40%, transparent); }
 .mon-bar { display: flex; height: 10px; border-radius: 5px; background: var(--fill); overflow: hidden; }
 .mon-bar.thin { height: 5px; border-radius: 3px; }
-.mon-bar i { display: block; height: 100%; transition: width .5s ease; }
+.mon-bar i { display: block; height: 100%; transition: width .15s linear; }
 .mon-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--label2); margin-top: -4px; }
 .mon-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; vertical-align: 0; }
 .mon-rows .kv { padding: 7px 0; font-size: 13.5px; }
@@ -416,7 +416,7 @@ textarea.input { height: auto; min-height: 88px; padding: 10px 12px; resize: ver
   background: var(--pad); border: 1px solid color-mix(in srgb, var(--pad) 86%, var(--label)); }
 .core.P .bars { border-color: color-mix(in srgb, var(--mon-cool) 30%, var(--bg3)); }
 .core .bars i { flex: 1; position: relative; border-radius: 4px; overflow: hidden; background: color-mix(in srgb, var(--bg) 50%, transparent); }
-.core .bars b { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 4px; transition: height .6s ease, background .6s ease; }
+.core .bars b { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 4px; transition: height .1s linear, background .3s linear; }
 .core .lbl { font-size: 10px; font-weight: 700; color: var(--label2); line-height: 1; }
 .core .ghz { font-size: 9.5px; color: var(--label3); line-height: 1; font-variant-numeric: tabular-nums; min-height: 9.5px; }
 

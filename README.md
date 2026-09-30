@@ -20,7 +20,9 @@ browser on the same network (or over Tailscale).
   the live round trip to the PC; tap it (or Tools → *System monitor*) for
   every core's load and clock (performance cores drawn bigger than efficiency
   cores), memory, GPU (VRAM, temperature, power, clocks, fan, encoder),
-  disks, network and the busiest apps, with a minute of history. **About** at the bottom has the PC's
+  disks, network and the busiest apps, with a minute of history. It updates
+  20 times a second (pushed over a WebSocket; the busiest apps once a second),
+  and the server only samples while it's open. **About** at the bottom has the PC's
   details, its addresses (with copy buttons), the certificate install guide
   and how to install the remote as an app.
 
