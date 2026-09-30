@@ -525,6 +525,12 @@ def about():
             "token": bool(os.environ.get("PC_API_TOKEN")), "certificate": _certificate()}
 
 
+@command("sysmon", "Live system monitor: every core, memory, GPU, disks, network, top processes.", hide=True)
+def system_monitor():
+    import sysmon
+    return sysmon.MONITOR.get()
+
+
 @command("stats", "Live CPU / RAM / GPU usage.", hide=True)
 def stats():
     return win32.STATS.snapshot()

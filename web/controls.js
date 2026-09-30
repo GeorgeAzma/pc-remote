@@ -117,7 +117,8 @@ function render() {
     row('upload', 'Send files to PC', 'Saved to Downloads', uploadPick),
     row('folder', 'Get files from PC', 'Browse & download', () => filesSheet()),
     row('clipboard', 'Clipboard', 'Sync text between devices', clipboardSheet),
-    row('cpu', 'Running apps', 'Memory use · end tasks', processesSheet));
+    row('cpu', 'Running apps', 'Memory use · end tasks', processesSheet),
+    row('pulse', 'System monitor', 'Every core, memory, GPU, disks, network', monitorSheet));
   const power = h('div', { class: 'card' },
     row('restart', 'Restart', 'Hold for a timer', () => act('restart', {}, 'Restarting…'),
         { strong: true, onLong: () => timers('restart', 'Restart', { force: true }) }),
@@ -127,7 +128,8 @@ function render() {
     row('logout', 'Sign out', 'Open apps will close', () => act('signout', {}, 'Signing out…'), { strong: true }));
   const extra = Object.entries(cmds).filter(([n, m]) => !m.hide && !KNOWN.has(n));
   root.replaceChildren(h('div', {},
-    h('div', { class: 'ctl-head' }, h('div', {}, h('h1', {}, INFO.host || 'PC'), h('div', { class: 'sub', id: 'ctl-stats' })), tabSwitch()),
+    h('div', { class: 'ctl-head' }, h('div', {}, h('h1', {}, INFO.host || 'PC'),
+      h('button', { class: 'sub', id: 'ctl-stats', title: 'System monitor', onclick: () => { haptic(5); monitorSheet(); } })), tabSwitch()),
     h('div', { id: 'ctl-banner' }),
     tiles,
     h('div', { class: 'card pad-x' },
@@ -186,6 +188,178 @@ function renderStats() {
   if (rtt != null) parts.push(h('span', { title: 'Round trip to the PC' }, 'RTT ', h('b', {}, rtt.toFixed(1) + ' ms')));
   if (s.uptime_s) parts.push(h('span', {}, 'Up ', h('b', {}, fmtDuration(s.uptime_s))));
   el.replaceChildren(...parts);
+}
+
+// ------------------------------------------------------ system monitor ---
+const fmtRate = b => b >= 1e6 ? (b / 1e6).toFixed(1) + ' MB/s' : b >= 1e3 ? (b / 1e3).toFixed(0) + ' KB/s' : Math.round(b) + ' B/s';
+const gb = b => (b / 2 ** 30).toFixed(b >= 100 * 2 ** 30 ? 0 : 1);
+// two rates with one shared unit: '76.1 / 18.3 MB/s'
+const pair = (a, b) => { const m = Math.max(a, b), [d, u] = m >= 1e6 ? [1e6, 'MB/s'] : m >= 1e3 ? [1e3, 'KB/s'] : [1, 'B/s'];
+  const f = v => (v / d).toFixed(d > 1 && m / d < 100 ? 1 : 0); return `${f(a)} / ${f(b)} ${u}`; };
+// load 0..100 -> a colour from calm blue to hot orange
+const heat = v => `color-mix(in srgb, var(--mon-hot) ${Math.round(Math.min(100, Math.max(0, v)) ** 1.25 / 100 ** 0.25)}%, var(--mon-cool))`;
+function spark(series, { max = 100, colors = ['var(--mon-cool)'] } = {}) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 59 20');
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.classList.add('spark');
+  const draw = data => {
+    const top = max || Math.max(1, ...data.flat());
+    svg.innerHTML = data.map((vals, k) => {
+      const pts = vals.slice(-60).map((v, i, a) => `${(59 - (a.length - 1 - i)).toFixed(1)},${(19.5 - 19 * Math.min(1, v / top)).toFixed(2)}`);
+      if (pts.length < 2) return '';
+      const c = colors[k % colors.length];
+      return `<path d="M${pts[0].split(',')[0]},20 L${pts.join(' L')} L59,20Z" fill="${c}" opacity=".16"/>` +
+             `<path d="M${pts.join(' L')}" fill="none" stroke="${c}" stroke-width="1.3" vector-effect="non-scaling-stroke"/>`;
+    }).join('');
+  };
+  draw(series);
+  return { el: svg, draw };
+}
+const bar = (parts, cls = '') => {  // parts: [[fraction, colour], ...]
+  const el = h('div', { class: 'mon-bar ' + cls });
+  const set = ps => el.replaceChildren(...ps.map(([f, c]) => h('i', { style: `width:${Math.max(0, Math.min(1, f)) * 100}%;background:${c}` })));
+  set(parts);
+  return { el, set };
+};
+
+async function monitorSheet() {
+  const body = h('div', { class: 'mon' }, h('div', { class: 'empty' }, 'Reading the system…'));
+  let open = true, update = null;
+  sheet({ title: 'System', body, wide: true, onClose: () => { open = false; } });
+  const tick = async () => {
+    if (!open) return;
+    try {
+      const d = await run('sysmon');
+      if (!d.warming) { update ||= buildMonitor(body, d); update(d); }
+    } catch {}
+    if (open) setTimeout(tick, 1000);
+  };
+  tick();
+}
+
+function buildMonitor(body, d0) {
+  const card = (title, ...kids) => h('div', { class: 'mon-card' }, h('div', { class: 'mon-k' }, title), ...kids);
+  const txt = (cls = '') => h('span', { class: cls });
+  const up = [];  // updaters, called with each new sample
+
+  // ---- CPU: a map of the cores; performance cores are bigger tiles with a bar per thread
+  const cores = d0.cpu.cores, units = cores.reduce((a, c) => a + c.threads.length, 0);
+  const nP = cores.filter(c => c.kind === 'P').length, nE = cores.filter(c => c.kind === 'E').length;
+  const cpuBig = txt('mon-big'), cpuClock = txt(), cpuSpark = spark([[]]);
+  const map = h('div', { class: 'cores', style: `grid-template-columns:repeat(${Math.min(units, 24)},1fr)` });
+  let pi = 0, ei = 0, ci = 0;
+  const tiles = cores.map(c => {
+    const label = c.kind === 'P' ? 'P' + ++pi : c.kind === 'E' ? 'E' + ++ei : String(++ci);
+    const fills = c.threads.map(() => h('b')), ghz = txt('ghz');
+    map.append(h('div', { class: `core ${c.kind}`, style: `grid-column:span ${Math.min(24, c.threads.length)}` },
+      h('div', { class: 'bars' }, fills.map(f => h('i', {}, f))), h('span', { class: 'lbl' }, label), ghz));
+    return { c, fills, ghz };
+  });
+  up.push(d => {
+    const c = d.cpu;
+    cpuBig.replaceChildren(String(Math.round(c.total ?? 0)), h('small', {}, '%'));
+    cpuClock.textContent = c.clock ? `${(c.clock / 1000).toFixed(2)} GHz` : '';
+    cpuSpark.draw([d.history.cpu]);
+    for (const t of tiles) {
+      t.c.threads.forEach((i, k) => {
+        const v = c.threads[i] ?? 0;
+        t.fills[k].style.height = Math.max(2, v) + '%';
+        t.fills[k].style.background = heat(v);
+      });
+      const m = Math.max(0, ...t.c.threads.map(i => c.mhz[i] || 0));
+      t.ghz.textContent = m ? (m / 1000).toFixed(1) : '';
+    }
+  });
+  const cpuCard = card('Processor',
+    h('div', { class: 'mon-head' }, cpuBig, h('div', { class: 'mon-side' },
+      h('div', {}, d0.cpu.name || 'CPU'),
+      h('div', {}, cpuClock, ` · ${nP ? `${nP}P + ${nE}E cores` : `${cores.length} cores`} · ${units} threads`))),
+    cpuSpark.el, map,
+    nP ? h('div', { class: 'mon-note' }, 'Taller tiles are performance cores (one bar per thread), smaller ones efficiency cores. Numbers are GHz.') : null);
+
+  // ---- memory
+  const memBig = txt('mon-big'), memSide = txt(), memBar = bar([]), memLegend = h('div', { class: 'mon-legend' });
+  const memRows = h('div', { class: 'mon-rows' }), memSpark = spark([[]]);
+  up.push(d => {
+    const m = d.mem, free = m.total - m.used;
+    memBig.replaceChildren(String(Math.round(100 * m.used / m.total)), h('small', {}, '%'));
+    memSide.textContent = `${gb(m.used)} of ${gb(m.total)} GB in use`;
+    memBar.set([[m.used / m.total, 'var(--mon-cool)'], [m.cached / m.total, 'color-mix(in srgb, var(--mon-cool) 35%, transparent)']]);
+    memLegend.replaceChildren(
+      h('span', {}, h('i', { style: 'background:var(--mon-cool)' }), `In use ${gb(m.used)} GB`),
+      h('span', {}, h('i', { style: 'background:color-mix(in srgb, var(--mon-cool) 35%, transparent)' }), `Cached ${gb(m.cached)} GB`),
+      h('span', {}, h('i', { style: 'background:var(--fill)' }), `Free ${gb(Math.max(0, free - m.cached))} GB`));
+    memRows.replaceChildren(kv('Committed', `${gb(m.commit)} / ${gb(m.commit_limit)} GB`),
+      kv('Kernel pools', `${gb(m.paged)} paged · ${gb(m.nonpaged)} non-paged GB`));
+    memSpark.draw([d.history.mem]);
+  });
+  const memCard = card('Memory', h('div', { class: 'mon-head' }, memBig, h('div', { class: 'mon-side' }, h('div', {}, memSide))),
+    memSpark.el, memBar.el, memLegend, memRows);
+
+  // ---- GPU
+  let gpuCard = null;
+  if (d0.gpu) {
+    const gBig = txt('mon-big'), gSpark = spark([[]]), vram = bar([]), vramTxt = txt(), stats = h('div', { class: 'mon-stats' });
+    const stat = (label, value, frac) => h('div', { class: 'mon-stat' }, h('div', { class: 'k' }, label), h('div', { class: 'v' }, value),
+      frac == null ? null : bar([[frac, heat(frac * 100)]], 'thin').el);
+    up.push(d => {
+      const g = d.gpu;
+      gBig.replaceChildren(String(Math.round(g.util ?? 0)), h('small', {}, '%'));
+      gSpark.draw([d.history.gpu]);
+      if (g.vram_total) {
+        vram.set([[g.vram_used / g.vram_total, 'var(--mon-cool)']]);
+        vramTxt.textContent = `VRAM ${gb(g.vram_used)} of ${gb(g.vram_total)} GB`;
+      } else vramTxt.textContent = g.vram_used ? `VRAM ${gb(g.vram_used)} GB in use` : '';
+      stats.replaceChildren(...[
+        g.temp != null && stat('Temperature', `${g.temp} °C`, g.temp / 90),
+        g.power_w != null && stat('Power', `${Math.round(g.power_w)}${g.power_limit_w ? ` / ${Math.round(g.power_limit_w)}` : ''} W`, g.power_limit_w ? g.power_w / g.power_limit_w : null),
+        g.clock != null && stat('Core clock', `${g.clock} MHz`, g.clock_max ? g.clock / g.clock_max : null),
+        g.mem_clock != null && stat('Memory clock', `${g.mem_clock} MHz`),
+        g.fan != null && stat('Fan', `${g.fan}%`, g.fan / 100),
+        g.encoder != null && stat('Video encode / decode', `${g.encoder}% / ${g.decoder ?? 0}%`, Math.max(g.encoder, g.decoder || 0) / 100),
+        g.pcie_rx != null && stat('PCIe ↓ in / ↑ out', pair(g.pcie_rx * 1024, g.pcie_tx * 1024)),
+      ].filter(Boolean));
+    });
+    gpuCard = card('Graphics', h('div', { class: 'mon-head' }, gBig, h('div', { class: 'mon-side' }, h('div', {}, d0.gpu.name || 'GPU'), h('div', {}, vramTxt))),
+      gSpark.el, vram.el, stats);
+  }
+
+  // ---- disks and network
+  const dRates = h('div', { class: 'mon-rates' }), dSpark = spark([[], []], { max: 0, colors: ['var(--mon-cool)', 'var(--mon-hot)'] }), vols = h('div', { class: 'mon-vols' });
+  up.push(d => {
+    const k = d.disk;
+    dRates.replaceChildren(h('span', { class: 'rd' }, `Read ${fmtRate(k.read)}`), h('span', { class: 'wr' }, `Write ${fmtRate(k.write)}`),
+      k.active != null ? h('span', {}, `${Math.round(k.active)}% active`) : null);
+    dSpark.draw([d.history.disk_r, d.history.disk_w]);
+    vols.replaceChildren(...k.volumes.map(v => h('div', { class: 'mon-vol' },
+      h('div', { class: 'row1' }, h('b', {}, v.name), h('span', {}, v.label), h('span', { class: 'v' }, `${gb(v.total - v.used)} GB free of ${gb(v.total)}`)),
+      bar([[v.used / v.total, heat(100 * v.used / v.total)]], 'thin').el)));
+  });
+  const nRates = h('div', { class: 'mon-rates' }), nSpark = spark([[], []], { max: 0, colors: ['var(--mon-cool)', 'var(--mon-hot)'] });
+  up.push(d => {
+    nRates.replaceChildren(h('span', { class: 'rd' }, `↓ ${fmtRate(d.net.rx)}`), h('span', { class: 'wr' }, `↑ ${fmtRate(d.net.tx)}`));
+    nSpark.draw([d.history.net_rx, d.history.net_tx]);
+  });
+  const diskCard = card('Disks', dRates, dSpark.el, vols);
+  const netCard = card('Network', nRates, nSpark.el);
+
+  // ---- busiest processes, system counts
+  const procs = h('div', { class: 'mon-procs' }), foot = h('div', { class: 'mon-foot' });
+  up.push(d => {
+    const top = Math.max(5, ...d.procs.map(p => p.cpu));
+    procs.replaceChildren(...d.procs.map(p => h('div', { class: 'mon-proc' },
+      h('span', { class: 'nm' }, p.name), h('span', { class: 'cpu' }, `${p.cpu.toFixed(1)}%`),
+      h('span', { class: 'mem' }, p.mem >= 2 ** 30 ? `${gb(p.mem)} GB` : `${Math.round(p.mem / 2 ** 20)} MB`),
+      bar([[p.cpu / top, heat(p.cpu * 4)]], 'thin').el)));
+    const c = d.counts;
+    foot.textContent = [`${c.processes} processes`, `${c.threads.toLocaleString()} threads`, `${c.handles.toLocaleString()} handles`,
+      `up ${fmtDuration(d.uptime_s)}`, d.battery ? `battery ${d.battery.percent}%${d.battery.charging ? ' ⚡' : ''}` : null].filter(Boolean).join(' · ');
+  });
+  const procCard = card('Busiest apps', procs);
+
+  body.replaceChildren(h('div', { class: 'mon-grid' }, cpuCard, memCard, gpuCard, diskCard, netCard, procCard), foot);
+  return d => up.forEach(f => f(d));
 }
 
 // --------------------------------------------------------------- about ---

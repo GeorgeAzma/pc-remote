@@ -17,7 +17,10 @@ browser on the same network (or over Tailscale).
   either way, clipboard sync, running apps, and timed shutdown/restart.
   Sleep, lock and power actions take two taps (the first turns the button
   red); press and hold them for timers. The header shows CPU, RAM, GPU and
-  the live round trip to the PC. **About** at the bottom has the PC's
+  the live round trip to the PC; tap it (or Tools → *System monitor*) for
+  every core's load and clock (performance cores drawn bigger than efficiency
+  cores), memory, GPU (VRAM, temperature, power, clocks, fan, encoder),
+  disks, network and the busiest apps, with a minute of history. **About** at the bottom has the PC's
   details, its addresses (with copy buttons), the certificate install guide
   and how to install the remote as an app.
 
@@ -226,6 +229,7 @@ def say(text: str = ""):
 | --- | --- |
 | `main.py` | HTTP/HTTPS server, routing, auth, uploads/downloads |
 | `commands.py` | `@command` registry and every PC action |
+| `sysmon.py` | live system monitor: per-core CPU and topology, memory, GPU, disks, network |
 | `video.py` | ffmpeg capture/encode pipeline, per-viewer rate control |
 | `tiles.py` | tiled JPEG: change tracking, rectangles, refinement |
 | `dxgicap.py` | ctypes DXGI desktop duplication and GPU shrinking |
