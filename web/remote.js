@@ -1003,7 +1003,7 @@ function firePin(c) {
 function renderStrip() {
   const kids = settings.pins.filter(c => !c.startsWith('mod:') || pinMod(c)).map(c => {
     const m = pinMod(c);
-    const b = h('button', { class: m ? 'chip mod' : pinKey(c) ? 'chip' : 'chip recent', title: pinName(c), 'data-mod': m || null }, pinLabel(c));
+    const b = h('button', { class: m ? 'chip mod' : 'chip', title: pinName(c), 'data-mod': m || null }, pinLabel(c));
     let holdT = 0, held = false;
     b.addEventListener('pointerdown', () => { held = false; holdT = setTimeout(() => { held = true; haptic(15); togglePin(c); }, 550); });
     for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) b.addEventListener(ev, () => clearTimeout(holdT));
