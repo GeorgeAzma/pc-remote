@@ -77,7 +77,7 @@ def version_resource(v: str) -> str:
     StringStruct('ProductName', 'PC Remote'),
     StringStruct('ProductVersion', '{v}'),
     StringStruct('OriginalFilename', 'PC Remote.exe'),
-    StringStruct('LegalCopyright', 'GeorgeAzma')])]),
+    StringStruct('LegalCopyright', 'Copyright (c) 2026 GeorgeAzma. MIT License.')])]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])])
 """)
     return path
@@ -99,6 +99,32 @@ def pyinstaller(v: str):
     dst = os.path.join(APP, "ffmpeg")
     shutil.rmtree(dst, ignore_errors=True)
     shutil.copytree(ffmpeg(), dst)
+    licenses()
+
+
+# What's bundled, for licenses/: (package, its project's licence page if it ships no text)
+BUNDLED = [("cryptography", None), ("numpy", None), ("simplejpeg", None), ("pyinstaller", None),
+           ("winrt-runtime", "https://github.com/pywinrt/pywinrt/blob/main/LICENSE")]
+
+
+def licenses():
+    """The licence texts of PC Remote and everything bundled with it, in
+    licenses/ next to the .exe (ffmpeg's is in ffmpeg/LICENSE.txt)."""
+    import importlib.metadata as md
+    out = os.path.join(APP, "licenses")
+    shutil.rmtree(out, ignore_errors=True)
+    os.makedirs(out)
+    shutil.copy(os.path.join(ROOT, "LICENSE"), os.path.join(out, "PC Remote.txt"))
+    shutil.copy(os.path.join(ROOT, "THIRD-PARTY-NOTICES.md"), out)
+    shutil.copy(os.path.join(sys.base_prefix, "LICENSE.txt"), os.path.join(out, "Python.txt"))
+    for name, page in BUNDLED:
+        dist = md.distribution(name)
+        files = [f for f in dist.files or [] if re.search(r"LICEN[CS]E|COPYING|NOTICE", f.name, re.I)]
+        text = "\n\n".join(f"==== {f} ====\n{f.read_text(encoding='utf-8')}" for f in files)
+        if not text:
+            text = f"{name} {dist.version}: {dist.metadata.get('License-Expression') or dist.metadata.get('License') or 'see its project'}\nLicence text: {page}\n"
+        with open(os.path.join(out, f"{name}.txt"), "w", encoding="utf-8") as fh:
+            fh.write(text)
 
 
 def signtool() -> str | None:
@@ -131,7 +157,8 @@ def inno(v: str) -> str:
                  if os.path.isfile(p)), None) or shutil.which("iscc")
     if not iscc:
         sys.exit("Inno Setup 6 not found (winget install JRSoftware.InnoSetup)")
-    cmd = [iscc, f"/DAppVersion={v}", f"/DSourceDir={APP}", f"/DOutputDir={DIST}"]
+    cmd = [iscc, f"/DAppVersion={v}", "/DAppNumericVersion=" + ".".join(map(str, numeric(v))),
+           f"/DSourceDir={APP}", f"/DOutputDir={DIST}"]
     if sign_args():  # the uninstaller inside the installer gets signed too
         cmd += ["/DSign=1", "/Ssigntool=" + subprocess.list2cmdline([signtool(), *sign_args()]) + " $f"]
     subprocess.run(cmd + [os.path.join(HERE, "installer.iss")], check=True)
@@ -142,6 +169,9 @@ def main():
     """--app-only: just dist/PC Remote/; --installer-only: the installer around an
     existing dist/PC Remote/ (the release workflow signs the app in between)."""
     v = version()
+    if "--print-version" in sys.argv:  # (for the release workflow)
+        print(v)
+        return
     print("version", v)
     if "--installer-only" not in sys.argv:
         pyinstaller(v)

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SignPath artifact configuration "app": PC Remote.exe, as uploaded by
+     .github/workflows/release.yml (a GitHub artifact is a zip). Only our own
+     program is signed; the bundled Python, ffmpeg and library files aren't. -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="PC Remote.exe" product-name="PC Remote" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

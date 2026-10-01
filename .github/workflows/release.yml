@@ -1,13 +1,12 @@
 # Builds the Windows installer on every version tag (v1.0.0, …) and attaches
 # it to a GitHub release. Run it by hand from the Actions tab to just build.
 #
-# Signing is free for open-source projects through SignPath Foundation
-# (https://signpath.org). Once the project is approved, add:
+# Signing: free for open-source projects through SignPath Foundation; setup
+# steps are in docs/SIGNING.md. Once these exist, builds are signed:
 #   secret   SIGNPATH_API_TOKEN
 #   variable SIGNPATH_ORGANIZATION_ID
-# and set up two signing requests' artifact configurations in SignPath:
-# "app" (the PC Remote.exe inside the zipped app folder) and "installer".
-# Without them the build still works, unsigned.
+# Without them the build still works, unsigned. Tags use the release-signing
+# policy (each request is approved in SignPath); runs by hand use test-signing.
 name: Release
 
 on:
@@ -23,6 +22,7 @@ jobs:
     runs-on: windows-latest
     env:
       SIGN: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+      POLICY: ${{ startsWith(github.ref, 'refs/tags/') && 'release-signing' || 'test-signing' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,10 +37,14 @@ jobs:
           python -m pip install -r requirements.txt pyinstaller
           if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) { choco install innosetup --no-progress -y }
 
+      - name: Version
+        id: ver
+        run: echo "version=$(python packaging/build.py --print-version)" >> $env:GITHUB_OUTPUT
+
       - name: Build the app
         run: python packaging/build.py --app-only
 
-      # ---- sign PC Remote.exe (SignPath) ----
+      # ---- sign PC Remote.exe (SignPath artifact configuration "app") ----
       - name: Upload the app for signing
         if: env.SIGN == 'true'
         id: app
@@ -50,15 +54,18 @@ jobs:
           path: dist/PC Remote/PC Remote.exe
       - name: Sign the app
         if: env.SIGN == 'true'
-        uses: signpath/github-action-submit-signing-request@v1
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
           project-slug: pc-remote
-          signing-policy-slug: release-signing
+          signing-policy-slug: ${{ env.POLICY }}
           artifact-configuration-slug: app
           github-artifact-id: ${{ steps.app.outputs.artifact-id }}
+          parameters: |
+            version: "${{ steps.ver.outputs.version }}"
           wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600  # (release signing waits for approval)
           output-artifact-directory: signed-app
       - name: Use the signed app
         if: env.SIGN == 'true'
@@ -67,7 +74,7 @@ jobs:
       - name: Build the installer
         run: python packaging/build.py --installer-only
 
-      # ---- sign the installer (SignPath) ----
+      # ---- sign the installer (SignPath artifact configuration "installer") ----
       - name: Upload the installer
         id: setup
         uses: actions/upload-artifact@v4
@@ -76,15 +83,18 @@ jobs:
           path: dist/PC-Remote-Setup-*.exe
       - name: Sign the installer
         if: env.SIGN == 'true'
-        uses: signpath/github-action-submit-signing-request@v1
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
           project-slug: pc-remote
-          signing-policy-slug: release-signing
+          signing-policy-slug: ${{ env.POLICY }}
           artifact-configuration-slug: installer
           github-artifact-id: ${{ steps.setup.outputs.artifact-id }}
+          parameters: |
+            version: "${{ steps.ver.outputs.version }}"
           wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
           output-artifact-directory: signed-setup
       - name: Use the signed installer
         if: env.SIGN == 'true'

@@ -4,6 +4,9 @@
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
+#ifndef AppNumericVersion
+  #define AppNumericVersion "0.0.0.0"
+#endif
 
 [Setup]
 AppId={{7C3F1E25-B4D4-4E8A-9C21-3F6B8D0E4A17}
@@ -11,6 +14,14 @@ AppName=PC Remote
 AppVersion={#AppVersion}
 AppVerName=PC Remote {#AppVersion}
 AppPublisher=GeorgeAzma
+AppCopyright=Copyright (c) 2026 GeorgeAzma. MIT License.
+; the .exe's details (SignPath checks the product name and version before signing)
+VersionInfoVersion={#AppNumericVersion}
+VersionInfoProductName=PC Remote
+VersionInfoProductTextVersion={#AppVersion}
+VersionInfoTextVersion={#AppVersion}
+VersionInfoDescription=PC Remote Setup
+VersionInfoCompany=GeorgeAzma
 AppPublisherURL=https://github.com/GeorgeAzma/pc-remote
 AppSupportURL=https://github.com/GeorgeAzma/pc-remote/issues
 DefaultDirName={autopf}\PC Remote
@@ -38,8 +49,12 @@ SignTool=signtool
 SignedUninstaller=yes
 #endif
 
+[Messages]
+; say plainly what Setup changes on the system
+SelectTasksLabel2=PC Remote lets your phone or another computer control this PC. Setup also allows it through Windows Firewall on private networks and Tailscale (never public networks). Uninstalling removes everything.
+
 [Tasks]
-Name: startup; Description: "Start PC Remote when you sign in (recommended)"
+Name: startup; Description: "Start PC Remote when you sign in, with admin rights so it can control admin windows (recommended)"
 Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Files]

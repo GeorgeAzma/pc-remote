@@ -75,6 +75,17 @@ winget install JRSoftware.InnoSetup
 
 The installer lands in `dist\`. Pushing a `v*` tag builds it on GitHub and attaches it to a release.
 
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+- Committers and reviewers: [GeorgeAzma](https://github.com/GeorgeAzma)
+- Approvers: [GeorgeAzma](https://github.com/GeorgeAzma)
+
+Only `PC Remote.exe` and the installer are signed, and they're built by [this workflow](.github/workflows/release.yml) from this repository. Setup steps are in [docs/SIGNING.md](docs/SIGNING.md).
+
+**Privacy:** this program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it. It only answers devices that connect to it. It has no telemetry and makes no connections of its own.
+
 ## Add a command
 
 ```python
@@ -84,3 +95,7 @@ def say(text: str = ""):
 ```
 
 This becomes `GET/POST /say?text=…` and a button in the app.
+
+## License
+
+MIT, see [LICENSE](LICENSE). The installer also bundles Python, FFmpeg (LGPL) and a few libraries under their own licences: see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
