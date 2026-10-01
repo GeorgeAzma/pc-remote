@@ -7,22 +7,36 @@ Your Windows PC, from your phone's browser. No app, no account, no cloud.
 - **Remote**: the live screen at up to 240 fps, 5–20 ms behind the real one. Trackpad, keyboard, pinch to zoom.
 - **Terminal**: PowerShell, CMD or WSL, full color, survives reconnects.
 - **Controls**: sleep, lock, media, volume, brightness, Wi-Fi, Bluetooth, open apps, send files, clipboard sync, power timers.
-- **System**: every core, GPU, memory, disks and network, 20 updates a second.
+- **System**: every core, GPU, memory, disks and network, 20 updates a second, with a minute of history.
+- **Sign-in**: scan the PC's QR code once and the phone stays signed in.
 
 ![The Remote tab in a desktop browser](docs/screenshots/desktop-remote.webp)
 ![The System tab in a desktop browser](docs/screenshots/desktop-system.webp)
 
 ## Install
 
-Run **PC-Remote-Setup.exe** from [Releases](https://github.com/GeorgeAzma/pc-remote/releases). That's it.
+Download the **PC-Remote-Setup** installer from the [latest release](https://github.com/GeorgeAzma/pc-remote/releases/latest) and run it. Python and ffmpeg are included.
 
-It starts with Windows (with admin rights, no UAC prompt) and opens the firewall on home networks and Tailscale only. It then shows a QR code: scan it with your phone and you're in.
+The installer isn't code-signed yet, so Windows may say "Windows protected your PC". Click **More info → Run anyway**.
 
-Away from home? Put the PC and the phone on [Tailscale](https://tailscale.com) and choose the Tailscale QR code.
+When it finishes, it shows a QR code: scan it with your phone and you're in. It also:
+
+- starts PC Remote when you sign in to Windows, with admin rights and no UAC prompt, so it can type into admin windows. Turn this off in **Controls → About → Start with Windows**. It's a Task Scheduler task, so it isn't in Task Manager's startup list;
+- opens the firewall on home networks and on Tailscale only, never on public networks.
+
+To open it on the PC later, open **PC Remote** from the Start menu: it shows the QR code again.
+
+Away from home? Put the PC and the phone on [Tailscale](https://tailscale.com) and pick the Tailscale QR code.
+
+Uninstalling (Settings → Apps) removes all of it, including the startup task, the firewall rules and the settings.
 
 ## Sign-in
 
-Sign-in is **on** by default. A new device scans the PC's QR code (with its camera, or **Scan the QR code** in the app) or enters the access code, once. The PC itself never has to (WSL, containers and tunnels on it do). Manage it in **Controls → About → Sign-in & devices**, where you can:
+Sign-in is **on** by default. A new device signs in once by scanning the PC's QR code, with the phone's camera or with **Scan the QR code** in the app, or by entering the access code. The PC itself never has to sign in; WSL, containers and tunnels running on it do.
+
+A signed-in device stays signed in: nothing expires. Its key is kept in the browser and in a cookie, so either one alone is enough. Each address (local network, Tailscale, `http` or `https`) signs in separately. Anyone with the QR code or link can sign in, so treat it like a password.
+
+Manage it in **Controls → About → Sign-in & devices**, where you can:
 
 - add a device with a QR code;
 - use your own password instead of the code;
