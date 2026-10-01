@@ -40,6 +40,12 @@ accounts:
    requests in SignPath (the app, then the installer) and the release gets the
    signed installer.
 
+   If the installer's request fails its metadata check: Inno Setup pads the
+   installer's product name and version with trailing spaces (it writes them
+   into fixed-width slots), and SignPath doesn't document whether it trims
+   them. `PC Remote.exe` has no padding. If that happens, ask SignPath support
+   how to match Inno Setup installers, or loosen `installer.xml`.
+
 What's signed: only `PC Remote.exe` and the installer, which are built from
 this repo. The Python runtime, ffmpeg and library files inside are third-party
 and stay as they are, as SignPath Foundation requires. The uninstaller
