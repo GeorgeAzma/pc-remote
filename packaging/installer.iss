@@ -29,7 +29,9 @@ UninstallDisplayIcon={app}\PC Remote.exe
 UninstallDisplayName=PC Remote
 Compression=lzma2/ultra64
 SolidCompression=yes
-WizardStyle=modern
+; follows Windows: dark in dark mode, the light Windows 11 look otherwise (the plain
+; "modern" style draws pale text on grey when Windows is in dark mode)
+WizardStyle=modern dynamic windows11
 UsedUserAreasWarning=no
 #ifdef Sign
 SignTool=signtool
