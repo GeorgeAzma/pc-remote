@@ -309,6 +309,24 @@ def wifi(on: bool = True):
         return {"status": "wifi_" + ("on" if on else "off")}
 
 
+def _startup_state():
+    import paths
+    import setup_win
+    if not paths.FROZEN:
+        return {"error": "only the installed app starts with Windows"}
+    return {"on": bool(setup_win.task_enabled())}
+
+
+@command("startup", "Start PC Remote when you sign in to Windows.", hide=True, state=_startup_state)
+def startup(on: bool = True):
+    import paths
+    import setup_win
+    if not paths.FROZEN:
+        raise RuntimeError("only the installed app starts with Windows")
+    setup_win.set_task_enabled(on, sys.executable)
+    return {"status": "on" if on else "off"}
+
+
 @command("bluetooth", "Turn Bluetooth on or off.", tab="tools", live=True, icon="bluetooth",
          state=lambda: {"on": _radio(3)})
 def bluetooth(on: bool = True):

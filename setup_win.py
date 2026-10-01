@@ -7,6 +7,7 @@
   (100.64.0.0/10, fd7a:115c:a1e0::/48) on any network; never on public
   networks otherwise"""
 import os
+import re
 import subprocess
 
 TASK = os.environ.get("PC_TASK_NAME", "PC Remote")  # (the override is for testing)
@@ -47,6 +48,30 @@ def unregister_task():
 
 def task_exists() -> bool:
     return _run(["schtasks", "/Query", "/TN", TASK]).returncode == 0
+
+
+def task_enabled() -> bool | None:
+    """Whether the sign-in task is switched on; None if there isn't one.
+    (From the task's XML, which isn't translated like schtasks' text is.)"""
+    r = subprocess.run(["schtasks", "/Query", "/TN", TASK, "/XML"], capture_output=True, creationflags=_NO_WINDOW)
+    if r.returncode != 0:
+        return None
+    raw = r.stdout
+    xml = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8", "replace")
+    settings = re.search(r"<Settings>(.*?)</Settings>", xml, re.S)
+    enabled = settings and re.search(r"<Enabled>(\w+)</Enabled>", settings.group(1))
+    return not (enabled and enabled.group(1).lower() == "false")
+
+
+def set_task_enabled(on: bool, exe: str):
+    """Start at sign-in or not: switch the task on or off (making it if the
+    installer was told not to). Needs admin, which the installed app has."""
+    have = task_enabled()
+    if have is None:
+        if on:
+            register_task(exe)
+        return
+    _run(["schtasks", "/Change", "/TN", TASK, "/ENABLE" if on else "/DISABLE"], check=True)
 
 
 def run_task() -> bool:

@@ -19,7 +19,7 @@ const TINT = { rocket: 'var(--orange)', link: 'var(--tint)', upload: 'var(--gree
   wifi: 'var(--tint)', bluetooth: 'var(--indigo)', power: 'var(--red)', info: 'var(--gray)', shield: 'var(--green)', lock: 'var(--teal)',
   download: 'var(--tint)' };
 const KNOWN = new Set(['sleep', 'lock', 'monitor', 'screenshot', 'play', 'prev', 'next', 'mute', 'volume', 'brightness',
-  'wifi', 'bluetooth', 'launch', 'sendlink', 'sendfile', 'restart', 'shutdown', 'hibernate', 'signout']);
+  'wifi', 'bluetooth', 'startup', 'launch', 'sendlink', 'sendfile', 'restart', 'shutdown', 'hibernate', 'signout']);
 
 async function load() {
   try {
@@ -154,6 +154,7 @@ function render() {
     h('div', { class: 'card' },
       row('info', 'About this PC', null, aboutSheet),
       row('shield', 'Sign-in & devices', null, securitySheet),
+      s.startup && 'on' in s.startup ? radioRow('startup', 'bolt', 'Start with Windows') : null,
       INFO.https ? row('lock', 'Secure connection', secureNow() ? 'On' : 'For the HD stream', certSheet) : null,
       row('download', 'Install as app', null, installSheet))));
   hydrateIcons(root);
